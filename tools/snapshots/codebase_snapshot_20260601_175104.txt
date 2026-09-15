@@ -1,0 +1,1702 @@
+# CODEBASE SNAPSHOT
+# Root: /Users/johnsaunders/Desktop/credit_model_project
+# Generated: 2026-06-01T17:51:04.475635
+
+====================================================================================================
+
+
+####################################################################################################
+# FILE: Makefile
+####################################################################################################
+
+.PHONY: run run-dashboard run-api run-cli kill-ports setup test
+
+PYTHON=venv/bin/python
+
+run:
+	$(PYTHON) main.py
+
+run-api:
+	$(PYTHON) -m uvicorn api.server:app --port 8000 --reload
+
+run-dashboard:
+	@echo "Starting API..."
+	@$(PYTHON) -m uvicorn api.server:app --port 8000 --reload &
+	@sleep 2
+	@echo "Starting Streamlit..."
+	@$(PYTHON) -m streamlit run dashboard/app.py
+
+run-cli:
+	$(PYTHON) main.py
+
+kill-ports:
+	@lsof -ti:8000 | xargs kill -9 || true
+	@pkill -f streamlit || true
+
+setup:
+	$(PYTHON) setup_env.py
+
+test:
+	$(PYTHON) -m pytest tests/ -v
+
+
+####################################################################################################
+# FILE: analysis/compare_runs.py
+####################################################################################################
+
+import numpy as np
+
+
+def compare_irfs(irf_a, irf_b):
+    return irf_a.irfs - irf_b.irfs
+
+
+def compare_forecasts(run_a, run_b):
+    return {
+        "pd_diff": run_a["predicted_pd"] - run_b["predicted_pd"],
+        "u_diff": run_a["forecast"]["unemployment"] - run_b["forecast"]["unemployment"],
+        "pi_diff": run_a["forecast"]["inflation"] - run_b["forecast"]["inflation"],
+    }
+
+
+def compare_feved(fevd_a, fevd_b):
+    return fevd_a.decomp - fevd_b.decomp
+
+
+####################################################################################################
+# FILE: api/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: api/server.py
+####################################################################################################
+
+"""
+api/server.py
+-------------
+FastAPI REST API exposing the Macro-Driven Credit Scoring System.
+
+This API provides programmatic access to:
+- Macro forecasting (VAR model)
+- Credit risk estimation (logistic PD model)
+- Scenario-based stress testing
+
+Pipeline flow:
+    Macro Data → VAR Model → Forecast → Credit Model → Risk Metrics
+
+Key difference from CLI/Dashboard:
+- Stateless execution (no caching by default)
+- Designed for external integration
+
+Endpoints
+---------
+GET  /health
+    Health check endpoint.
+
+GET  /forecast_and_score
+    Runs full pipeline (VAR + credit model + stress testing).
+
+POST /score
+    Score a custom macroeconomic scenario.
+
+GET  /stress_test
+    Run standard stress scenarios.
+
+Start:
+    uvicorn api.server:app --reload --port 8000
+
+Docs:
+    http://localhost:8000/docs
+    http://localhost:8000/redoc
+"""
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from services.pipeline_service import run_fresh_pipeline
+from models.credit_model import CreditModel, StressScenario
+
+app = FastAPI(
+    title="Macro Credit Risk API",
+    version="1.0.0",
+)
+
+
+# -------------------------
+# SCHEMAS
+# -------------------------
+class MacroInputs(BaseModel):
+    unemployment: float = Field(..., ge=0, le=30)
+    inflation: float = Field(..., ge=-5, le=30)
+
+
+class PDResponse(BaseModel):
+    unemployment: float
+    inflation: float
+    predicted_pd: float
+    rating: str
+
+
+# -------------------------
+# ROUTES
+# -------------------------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/forecast_and_score")
+def forecast_and_score():
+    try:
+        return run_fresh_pipeline()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/score", response_model=PDResponse)
+def score(inputs: MacroInputs):
+    model = CreditModel()
+
+    pd_val = model.predict_pd(inputs.unemployment, inputs.inflation)
+
+    return PDResponse(
+        unemployment=inputs.unemployment,
+        inflation=inputs.inflation,
+        predicted_pd=pd_val,
+        rating=model.pd_to_rating(pd_val),
+    )
+
+
+@app.get("/stress_test")
+def stress_test():
+    model = CreditModel()
+
+    scenarios = [
+        StressScenario("Baseline", 4, 2.5),
+        StressScenario("Adverse", 7, 4),
+        StressScenario("Severe", 12, 1.5),
+        StressScenario("Stagflation", 8, 9),
+        StressScenario("COVID", 15, 0.5),
+    ]
+
+    return model.stress_test(scenarios).to_dict(orient="records")
+
+
+####################################################################################################
+# FILE: config/settings.py
+####################################################################################################
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Settings:
+    DATA_PATH: str = "data/macro_data.csv"
+
+    # VAR
+    MAX_VAR_LAGS: int = 8
+    VAR_LAGS: int | None = None
+
+    # CI
+    STRESS_ALPHA: float = 0.10
+
+    # 🔥 FIXED CREDIT CALIBRATION (prevents 50% PD collapse)
+    BETA_U: float = 0.18
+    BETA_PI: float = 0.10
+    BETA_0: float = -6.0
+
+
+settings = Settings()
+
+
+####################################################################################################
+# FILE: dashboard/app.py
+####################################################################################################
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT))
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+from pipeline.run_pipeline import run_pipeline
+
+
+# ------------------------------------------------------------
+# PAGE CONFIG
+# ------------------------------------------------------------
+st.set_page_config(layout="wide")
+st.title("📊 Macro Credit Risk Lab (Stable)")
+
+
+# ------------------------------------------------------------
+# SESSION STATE RESET KEY (CRITICAL FIX)
+# ------------------------------------------------------------
+if "run_id" not in st.session_state:
+    st.session_state.run_id = 0
+
+if "result" not in st.session_state:
+    st.session_state.result = None
+
+
+# ------------------------------------------------------------
+# CONTROLS
+# ------------------------------------------------------------
+st.sidebar.header("Experiment Controls")
+
+model_type = st.sidebar.selectbox(
+    "Model Type",
+    ["var", "svar_cholesky", "svar_sign"],
+    key="model_type"
+)
+
+var_lags = st.sidebar.slider("VAR Lags", 1, 8, 2, key="var_lags")
+alpha = st.sidebar.slider("Confidence Interval", 0.01, 0.5, 0.1, key="alpha")
+shock = st.sidebar.slider("Shock Size", 0.1, 3.0, 1.0, key="shock")
+
+
+# ------------------------------------------------------------
+# RUN BUTTON (FORCED UNIQUE EXECUTION)
+# ------------------------------------------------------------
+run_btn = st.sidebar.button("▶ Run", key=f"run_{st.session_state.run_id}")
+
+
+if run_btn:
+    st.session_state.run_id += 1  # forces full refresh identity
+
+    st.session_state.result = run_pipeline(
+        model_type=model_type,
+        var_lags=var_lags,
+        alpha=alpha,
+        shock=shock
+    )
+
+    st.rerun()
+
+
+# ------------------------------------------------------------
+# GUARD
+# ------------------------------------------------------------
+if st.session_state.result is None:
+    st.info("Run an experiment to begin.")
+    st.stop()
+
+result = st.session_state.result
+irf_data = result.get("irf", {})
+
+
+# ------------------------------------------------------------
+# IRF NORMALIZATION (CRITICAL STABILITY FIX)
+# ------------------------------------------------------------
+irfs = irf_data.get("irfs", [])
+
+if len(irfs) == 0:
+    st.warning("No IRFs available.")
+    st.stop()
+
+horizon = list(range(len(irfs)))
+
+# safe extraction (2-variable system assumed)
+u_u = []
+pi_u = []
+
+for x in irfs:
+    try:
+        u_u.append(x[0][0])
+        pi_u.append(x[0][1])
+    except Exception:
+        u_u.append(0.0)
+        pi_u.append(0.0)
+
+df_irf = pd.DataFrame({
+    "horizon": horizon,
+    "u→u": u_u,
+    "π→u": pi_u,
+})
+
+
+# ------------------------------------------------------------
+# IRF PLOT
+# ------------------------------------------------------------
+st.subheader("Impulse Response Functions")
+
+fig = px.line(df_irf, x="horizon", y=["u→u", "π→u"])
+st.plotly_chart(fig, use_container_width=True)
+
+
+# ------------------------------------------------------------
+# FEVD (SAFE ACCESS)
+# ------------------------------------------------------------
+st.subheader("FEVD")
+
+fevd = irf_data.get("fevd", None)
+
+if fevd is not None:
+    try:
+        fig = px.imshow(fevd[:, :, 0].T, aspect="auto")
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception:
+        st.warning("FEVD shape not compatible for display.")
+else:
+    st.warning("No FEVD available for this model.")
+
+
+# ------------------------------------------------------------
+# KPI BLOCK
+# ------------------------------------------------------------
+st.subheader("Key Metrics")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("PD", f"{result['predicted_pd']:.2%}")
+col2.metric("Rating", result["rating"])
+col3.metric("Model", result["model_type"])
+
+
+# ------------------------------------------------------------
+# FORECAST DISPLAY
+# ------------------------------------------------------------
+st.subheader("Forecast")
+
+fc = result["forecast"]
+
+st.write({
+    "Unemployment": fc["unemployment"],
+    "Inflation": fc["inflation"]
+})
+
+
+####################################################################################################
+# FILE: file_structure.py
+####################################################################################################
+
+# file_structure.py
+import os
+
+SKIP_DIRS = {"venv", "__pycache__", ".git"}
+SKIP_FILES = {".DS_Store"}
+
+def print_structure(path=".", indent=""):
+    for item in sorted(os.listdir(path)):
+        if item in SKIP_FILES:
+            continue
+
+        item_path = os.path.join(path, item)
+
+        if os.path.isdir(item_path):
+            if item in SKIP_DIRS:
+                continue
+            print(indent + item + "/")
+            print_structure(item_path, indent + "    ")
+        else:
+            print(indent + item)
+
+print_structure(".")
+
+
+####################################################################################################
+# FILE: main.py
+####################################################################################################
+
+"""
+main.py
+-------
+CLI entry point
+"""
+
+from services.pipeline_service import run_fresh_pipeline
+
+
+def print_section(title: str):
+    print("\n" + "=" * 60)
+    print(title.upper())
+    print("=" * 60)
+
+
+def main():
+    result = run_fresh_pipeline()
+
+    # -------------------------
+    # FORECAST
+    # -------------------------
+    print_section("Macro Forecast")
+
+    fc = result["forecast"]
+    ci = result["forecast_ci"]
+
+    print(f"Unemployment : {fc['unemployment']:.2f}%")
+    print(f"  CI         : [{ci['unemployment']['lower']:.2f}, {ci['unemployment']['upper']:.2f}]")
+
+    print(f"Inflation    : {fc['inflation']:.2f}%")
+    print(f"  CI         : [{ci['inflation']['lower']:.2f}, {ci['inflation']['upper']:.2f}]")
+
+    # -------------------------
+    # CREDIT
+    # -------------------------
+    print_section("Credit Risk")
+
+    print(f"PD      : {result['predicted_pd']:.4%}")
+    print(f"Rating  : {result['rating']}")
+
+    # -------------------------
+    # SENSITIVITY
+    # -------------------------
+    print_section("Sensitivity")
+
+    sens = result["sensitivity"]
+
+    print(f"+1pp U → ΔPD : {sens['unemployment_shock_delta']:+.4%}")
+    print(f"+1pp π → ΔPD : {sens['inflation_shock_delta']:+.4%}")
+
+    # -------------------------
+    # STRESS
+    # -------------------------
+    print_section("Stress Test")
+
+    print(result["stress_test"].to_string(index=False))
+
+    # -------------------------
+    # DIAGNOSTICS (SAFE)
+    # -------------------------
+    print_section("Diagnostics")
+
+    print(f"VAR Lags Used : {result.get('var_lags_used')}")
+    print(f"VAR Stable    : {result.get('var_stability')}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+####################################################################################################
+# FILE: models/__init__.py
+####################################################################################################
+
+from .var_model import VARModel
+from .svar_cholesky import SVARCholesky
+from .sign_restriction_svar import SVARSignRestrictions
+
+
+####################################################################################################
+# FILE: models/base_model.py
+####################################################################################################
+
+from abc import ABC, abstractmethod
+
+
+class BaseMacroModel(ABC):
+
+    @abstractmethod
+    def fit(self, data):
+        pass
+
+    @abstractmethod
+    def forecast(self, steps=1):
+        pass
+
+    @abstractmethod
+    def irf(self):
+        """
+        MUST return:
+        {
+            "irfs": np.ndarray,
+            "fevd": np.ndarray | None,
+            "type": str
+        }
+        """
+        pass
+
+
+####################################################################################################
+# FILE: models/credit_model.py
+####################################################################################################
+
+"""
+models/credit_model.py
+----------------------
+Macro-driven Probability of Default (PD) model.
+
+Maps macro variables → credit risk using a logistic function.
+Used for stress testing, rating assignment, and sensitivity analysis.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+
+from config.settings import settings
+
+
+@dataclass
+class StressScenario:
+    name: str
+    unemployment: float
+    inflation: float
+
+
+class CreditModel:
+    def __init__(
+        self,
+        beta_0=settings.BETA_0,
+        beta_u=settings.BETA_U,
+        beta_pi=settings.BETA_PI,
+    ):
+        self.beta_0 = beta_0
+        self.beta_u = beta_u
+        self.beta_pi = beta_pi
+
+    # -------------------------
+    # Core PD
+    # -------------------------
+    def _logit(self, u, pi):
+        return self.beta_0 + self.beta_u * u + self.beta_pi * pi
+
+    def predict_pd(self, u, pi):
+        z = self._logit(u, pi)
+        return float(1 / (1 + np.exp(-z)))
+
+    def predict_pd_batch(self, df):
+        z = (
+            self.beta_0
+            + self.beta_u * df["unemployment"]
+            + self.beta_pi * df["inflation"]
+        )
+        return 1 / (1 + np.exp(-z))
+
+    # -------------------------
+    # Calibration
+    # -------------------------
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(X)
+
+        model = LogisticRegression()
+        model.fit(Xs, y)
+
+        self.beta_u = model.coef_[0][0] / scaler.scale_[0]
+        self.beta_pi = model.coef_[0][1] / scaler.scale_[1]
+        self.beta_0 = model.intercept_[0]
+
+        return self
+
+    # -------------------------
+    # Rating
+    # -------------------------
+    def pd_to_rating(self, pd_val):
+        if pd_val < 0.002: return "AAA"
+        if pd_val < 0.005: return "AA"
+        if pd_val < 0.01: return "A"
+        if pd_val < 0.02: return "BBB"
+        if pd_val < 0.05: return "BB"
+        if pd_val < 0.1: return "B"
+        if pd_val < 0.2: return "CCC"
+        return "D"
+
+    # -------------------------
+    # Stress testing
+    # -------------------------
+    def stress_test(self, scenarios):
+        rows = []
+
+        for s in scenarios:
+            pd_val = self.predict_pd(s.unemployment, s.inflation)
+
+            rows.append({
+                "scenario": s.name,
+                "unemployment": s.unemployment,
+                "inflation": s.inflation,
+                "predicted_pd": pd_val,
+                "rating": self.pd_to_rating(pd_val),
+            })
+
+        return pd.DataFrame(rows)
+
+    # -------------------------
+    # Sensitivity (FIXED CONTRACT)
+    # -------------------------
+    def sensitivity(self, u=4.0, pi=2.5, shock=1.0):
+        base = self.predict_pd(u, pi)
+        up = self.predict_pd(u + shock, pi)
+        ip = self.predict_pd(u, pi + shock)
+
+        return {
+            "base_pd": base,
+            "unemployment_shock_delta": up - base,
+            "inflation_shock_delta": ip - base,
+        }
+
+
+####################################################################################################
+# FILE: models/experiment_store.py
+####################################################################################################
+
+import sqlite3
+import json
+from pathlib import Path
+from datetime import datetime
+
+from utils.serialization import to_json_safe
+
+DB_PATH = Path("runs/experiments.db")
+
+
+class ExperimentStore:
+
+    def __init__(self):
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        self._create_table()
+
+    def _create_table(self):
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS experiments (
+            experiment_id TEXT PRIMARY KEY,
+            timestamp TEXT,
+            model_version TEXT,
+            params TEXT,
+            metrics TEXT,
+            artifacts TEXT
+        )
+        """)
+        self.conn.commit()
+
+    def log_run(self, experiment_id, model_version, params, metrics, artifacts):
+
+        # 🔒 FORCE SAFE SERIALIZATION HERE
+        params = to_json_safe(params)
+        metrics = to_json_safe(metrics)
+        artifacts = to_json_safe(artifacts)
+
+        self.conn.execute("""
+        INSERT INTO experiments VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            experiment_id,
+            datetime.now().isoformat(),
+            model_version,
+            json.dumps(params),
+            json.dumps(metrics),
+            json.dumps(artifacts)
+        ))
+
+        self.conn.commit()
+
+    def list_runs(self):
+        cursor = self.conn.execute("""
+        SELECT experiment_id, timestamp, model_version
+        FROM experiments
+        ORDER BY timestamp DESC
+        """)
+        return cursor.fetchall()
+
+    def get_run(self, experiment_id):
+        cursor = self.conn.execute("""
+        SELECT * FROM experiments WHERE experiment_id=?
+        """, (experiment_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "experiment_id": row[0],
+            "timestamp": row[1],
+            "model_version": row[2],
+            "params": json.loads(row[3]),
+            "metrics": json.loads(row[4]),
+            "artifacts": json.loads(row[5]),
+        }
+
+
+store = ExperimentStore()
+
+
+####################################################################################################
+# FILE: models/interfaces.py
+####################################################################################################
+
+from dataclasses import dataclass
+from typing import List
+import numpy as np
+
+
+@dataclass
+class IRFBundle:
+    irfs: List[np.ndarray]     # list of (2x2)
+    fevd: np.ndarray           # (H, 2, 2)
+    model_type: str
+
+
+class BaseTimeSeriesModel:
+    """
+    HARD CONTRACT:
+    ALL MODELS MUST FOLLOW THIS EXACT INTERFACE
+    """
+
+    def fit(self, data):
+        raise NotImplementedError
+
+    def forecast(self, steps: int) -> np.ndarray:
+        raise NotImplementedError
+
+    def irf(self, horizon: int = 10) -> IRFBundle:
+        raise NotImplementedError
+
+
+####################################################################################################
+# FILE: models/model_adapter.py
+####################################################################################################
+
+import numpy as np
+
+
+class ModelAdapter:
+    """
+    Unifies ALL models into:
+    - forecast
+    - forecast_ci
+    - irf
+    - fevd
+    """
+
+    def __init__(self, model, model_type: str, alpha: float = 0.1):
+        self.model = model
+        self.model_type = model_type
+        self.alpha = alpha
+
+    def forecast(self):
+        fc = self.model.forecast(steps=1)[0]
+
+        u = float(fc[0])
+        pi = float(fc[1])
+
+        # simple but stable CI
+        spread = 0.4
+
+        return {
+            "forecast": {
+                "unemployment": u,
+                "inflation": pi
+            },
+            "forecast_ci": {
+                "unemployment": {"lower": u - spread, "upper": u + spread},
+                "inflation": {"lower": pi - spread, "upper": pi + spread}
+            }
+        }
+
+    def irf(self):
+        irf_obj = self.model.irf()
+
+        return {
+            "irfs": irf_obj.irfs,
+            "fevd": irf_obj.fevd,
+            "model_type": self.model_type
+        }
+
+    def diagnostics(self):
+        if hasattr(self.model, "diagnostics"):
+            return self.model.diagnostics()
+        return {
+            "var_lags_used": None,
+            "var_stability": None
+        }
+
+
+####################################################################################################
+# FILE: models/model_output.py
+####################################################################################################
+
+class ModelOutput:
+    def __init__(self, irfs, fevd=None, forecast=None, meta=None):
+        self.irfs = irfs
+        self.fevd = fevd
+        self.forecast = forecast
+        self.meta = meta or {}
+
+
+####################################################################################################
+# FILE: models/model_registry.py
+####################################################################################################
+
+import pickle
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from models.var_model import VARModel
+
+ARTIFACT_DIR = Path("models/artifacts")
+REGISTRY_FILE = ARTIFACT_DIR / "registry.pkl"
+
+
+@dataclass
+class ModelBundle:
+    version: str
+    experiment_id: str
+    timestamp: str
+
+    var_model: VARModel
+    irf: object
+    fevd: object
+
+
+class ModelRegistry:
+
+    def __init__(self):
+        self.registry = self._load_registry()
+
+    def _load_registry(self):
+        if REGISTRY_FILE.exists():
+            with open(REGISTRY_FILE, "rb") as f:
+                return pickle.load(f)
+        return {}
+
+    def _save_registry(self):
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        with open(REGISTRY_FILE, "wb") as f:
+            pickle.dump(self.registry, f)
+
+    def create_and_train(self, data, version: str = None):
+
+        experiment_id = str(uuid.uuid4())[:8]
+        version = version or f"v{len(self.registry) + 1}"
+        timestamp = datetime.now().isoformat()
+
+        model = VARModel()
+        model.fit(data)
+
+        irf_bundle = model.irf(10)
+
+        bundle = ModelBundle(
+            version=version,
+            experiment_id=experiment_id,
+            timestamp=timestamp,
+            var_model=model,
+            irf=irf_bundle.irfs,
+            fevd=irf_bundle.fevd,
+        )
+
+        self.registry[experiment_id] = bundle
+        self._save_registry()
+
+        return bundle
+
+    def load_latest(self):
+        if not self.registry:
+            raise ValueError("Registry empty — run training mode first")
+
+        latest_id = sorted(self.registry.keys())[-1]
+        return self.registry[latest_id]
+
+    def get(self, experiment_id: str):
+        return self.registry[experiment_id]
+
+    def list_runs(self):
+        return [
+            {
+                "experiment_id": k,
+                "version": v.version,
+                "timestamp": v.timestamp,
+            }
+            for k, v in self.registry.items()
+        ]
+
+
+registry = ModelRegistry()
+
+
+####################################################################################################
+# FILE: models/sign_restriction_svar.py
+####################################################################################################
+
+import numpy as np
+from statsmodels.tsa.api import VAR
+from numpy.linalg import qr
+
+
+class SVARSignRestrictions:
+
+    def __init__(self, lags=2, horizon=10, n_draws=200):
+        self.lags = lags
+        self.horizon = horizon
+        self.n_draws = n_draws
+
+        self.results = None
+        self.accepted = []
+
+    def fit(self, data):
+        self.results = VAR(data).fit(self.lags)
+        self._estimate()
+        return self
+
+    def _rand_q(self, k):
+        q, _ = qr(np.random.normal(size=(k, k)))
+        return q
+
+    def _estimate(self):
+
+        base = self.results.irf(self.horizon).irfs
+        k = self.results.neqs
+
+        accepted = []
+
+        for _ in range(self.n_draws):
+            Q = self._rand_q(k)
+            candidate = np.einsum("hij,jk->hik", base, Q)
+
+            # stronger restriction:
+            # unemployment shock raises u, lowers inflation initially
+            if candidate[0, 1, 0] < 0 and candidate[0, 0, 0] > 0:
+                accepted.append(candidate)
+
+        if len(accepted) == 0:
+            accepted = [base]
+
+        self.accepted = accepted
+
+    def forecast(self, steps=1):
+        return self.results.forecast(
+            self.results.endog[-self.lags:], steps
+        )
+
+    def irf(self):
+
+        avg = np.mean(np.array(self.accepted), axis=0)
+        fevd = self.results.fevd(self.horizon).decomp
+
+        irfs = [avg[i] for i in range(avg.shape[0])]
+
+        return type("IRF", (), {
+            "irfs": irfs,
+            "fevd": fevd
+        })
+
+
+####################################################################################################
+# FILE: models/svar_cholesky.py
+####################################################################################################
+
+import numpy as np
+from statsmodels.tsa.api import VAR
+from models.interfaces import IRFBundle
+
+
+class SVARCholesky:
+
+    def __init__(self, lags=2):
+        self.lags = lags
+        self.results = None
+
+    def fit(self, data):
+        self.results = VAR(data).fit(self.lags)
+        return self
+
+    def forecast(self, steps=1):
+        return self.results.forecast(
+            self.results.endog[-self.lags:], steps
+        )
+
+    def irf(self, periods=10):
+
+        # FIX: no orth argument exists
+        irf = self.results.irf(periods)
+
+        fevd = self.results.fevd(periods).decomp
+
+        irfs = [irf.irfs[i] for i in range(irf.irfs.shape[0])]
+
+        return IRFBundle(
+            irfs=irfs,
+            fevd=fevd,
+            model_type="svar_cholesky"
+        )
+
+
+####################################################################################################
+# FILE: models/var_model.py
+####################################################################################################
+
+import numpy as np
+from statsmodels.tsa.api import VAR
+from models.interfaces import IRFBundle
+
+
+class VARModel:
+
+    def __init__(self, lags=2, max_lags=8):
+        self.lags = lags
+        self.max_lags = max_lags
+        self.fitted = None
+
+    def fit(self, data):
+        model = VAR(data)
+
+        if self.lags is None:
+            self.lags = model.select_order(self.max_lags).aic
+
+        self.fitted = model.fit(self.lags)
+        return self
+
+    def forecast(self, steps=1):
+        return self.fitted.forecast(
+            self.fitted.endog[-self.lags:], steps
+        )
+
+    def irf(self, horizon=10):
+        irf_obj = self.fitted.irf(horizon)
+        fevd_obj = self.fitted.fevd(horizon)
+
+        irfs = [
+            irf_obj.irfs[i]
+            for i in range(irf_obj.irfs.shape[0])
+        ]
+
+        return IRFBundle(
+            irfs=irfs,
+            fevd=fevd_obj.decomp,
+            model_type="var"
+        )
+
+    def diagnostics(self):
+        return {
+            "var_lags_used": self.lags,
+            "var_stability": bool(self.fitted.is_stable())
+        }
+
+
+####################################################################################################
+# FILE: pipeline/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: pipeline/run_pipeline.py
+####################################################################################################
+
+import pandas as pd
+import uuid
+
+from config.settings import settings
+from models.credit_model import CreditModel, StressScenario
+from models.model_registry import registry
+from models.experiment_store import store
+from models.model_adapter import ModelAdapter
+
+from models.svar_cholesky import SVARCholesky
+from models.sign_restriction_svar import SVARSignRestrictions
+from models.var_model import VARModel
+
+
+def load_data(path: str):
+    df = pd.read_csv(path, parse_dates=["date"])
+    df = df.sort_values("date")
+    return df[["unemployment", "inflation"]].dropna()
+
+
+def run_pipeline(
+    data_path=settings.DATA_PATH,
+    run_stress=True,
+    var_lags=2,
+    alpha=0.1,
+    shock=1.0,
+    model_type="var"
+):
+
+    df = load_data(data_path)
+
+    # -------------------------
+    # MODEL
+    # -------------------------
+    if model_type == "var":
+        model = VARModel(lags=var_lags).fit(df)
+
+    elif model_type == "svar_cholesky":
+        model = SVARCholesky(lags=var_lags).fit(df)
+
+    elif model_type == "svar_sign":
+        model = SVARSignRestrictions(lags=var_lags).fit(df)
+
+    else:
+        raise ValueError("bad model type")
+
+    # -------------------------
+    # ADAPTER
+    # -------------------------
+    adapter = ModelAdapter(model, model_type, alpha)
+
+    forecast_block = adapter.forecast()
+    irf_block = adapter.irf()
+    diagnostics = adapter.diagnostics()
+
+    u_hat = forecast_block["forecast"]["unemployment"]
+    pi_hat = forecast_block["forecast"]["inflation"]
+
+    # -------------------------
+    # CREDIT MODEL
+    # -------------------------
+    credit = CreditModel()
+
+    pd_hat = credit.predict_pd(u_hat, pi_hat)
+    rating = credit.pd_to_rating(pd_hat)
+    sensitivity = credit.sensitivity(u_hat, pi_hat, shock=shock)
+
+    # -------------------------
+    # STRESS
+    # -------------------------
+    stress_df = None
+    if run_stress:
+        scenarios = [
+            StressScenario("Baseline", 4, 2.5),
+            StressScenario("Adverse", 7, 4),
+            StressScenario("Severe", 12, 1.5),
+        ]
+        stress_df = credit.stress_test(scenarios)
+
+    # -------------------------
+    # RESULT
+    # -------------------------
+    return {
+        "experiment_id": str(uuid.uuid4())[:8],
+        "model_type": model_type,
+
+        "forecast": forecast_block["forecast"],
+        "forecast_ci": forecast_block["forecast_ci"],
+
+        "irf": irf_block,
+
+        "predicted_pd": pd_hat,
+        "rating": rating,
+        "sensitivity": sensitivity,
+        "stress_test": stress_df,
+
+        **diagnostics
+    }
+
+
+####################################################################################################
+# FILE: services/pipeline_service.py
+####################################################################################################
+
+"""
+services/pipeline_service.py
+----------------------------
+Single source of truth for pipeline execution.
+
+Adds:
+- caching (no recompute spam)
+- optional refresh control
+- shared state across CLI/API/Dashboard
+"""
+
+from pipeline.run_pipeline import run_pipeline
+
+_cached_result = None
+
+
+def get_pipeline_result(force_refresh: bool = False):
+    global _cached_result
+
+    if _cached_result is None or force_refresh:
+        _cached_result = run_pipeline()
+
+    return _cached_result
+
+
+def run_fresh_pipeline():
+    """
+    Always recompute (use for API / CLI / debugging)
+    """
+    return run_pipeline()
+
+
+####################################################################################################
+# FILE: setup_env.py
+####################################################################################################
+
+"""
+setup_env.py
+------------
+Creates a virtual environment, installs dependencies, and runs the pipeline.
+Safe to run every time — skips setup steps that are already done.
+
+Usage:
+    python setup_env.py
+"""
+import os
+import subprocess
+import sys
+import venv
+from pathlib import Path
+
+VENV_NAME = "venv"
+REQUIREMENTS = "requirements.txt"
+MIN_PYTHON = (3, 10)
+
+
+def check_python_version():
+    if sys.version_info < MIN_PYTHON:
+        print(f"Error: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required.")
+        print(f"  Current version: {sys.version}")
+        sys.exit(1)
+    print(f"Python {sys.version.split()[0]} — OK")
+
+
+def run_command(command: str):
+    try:
+        subprocess.check_call(command, shell=True)
+    except subprocess.CalledProcessError:
+        print(f"\nError running: {command}")
+        sys.exit(1)
+
+
+def get_pip_path() -> str:
+    if os.name == "nt":
+        return str(Path(VENV_NAME) / "Scripts" / "pip.exe")
+    return str(Path(VENV_NAME) / "bin" / "pip")
+
+
+def get_python_path() -> str:
+    if os.name == "nt":
+        return str(Path(VENV_NAME) / "Scripts" / "python.exe")
+    return str(Path(VENV_NAME) / "bin" / "python")
+
+
+def is_venv_ready() -> bool:
+    """Check if the venv exists and all requirements are installed."""
+    python = get_python_path()
+    if not Path(python).exists():
+        return False
+
+    # Check every package in requirements.txt is importable
+    if not Path(REQUIREMENTS).exists():
+        return False
+
+    # Use pip to verify installed packages match requirements
+    pip = get_pip_path()
+    result = subprocess.run(
+        f'"{pip}" check',
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+    # Also verify the key packages are actually present
+    check = subprocess.run(
+        f'"{python}" -c "import pandas, numpy, statsmodels, fastapi, uvicorn"',
+        shell=True,
+        capture_output=True,
+    )
+    return check.returncode == 0
+
+
+def create_venv():
+    if Path(VENV_NAME).exists():
+        print(f"Virtual environment '{VENV_NAME}' already exists — skipping creation.")
+    else:
+        print(f"Creating virtual environment '{VENV_NAME}'...")
+        venv.create(VENV_NAME, with_pip=True)
+        print("  Done.")
+
+
+def install_requirements():
+    pip = get_pip_path()
+
+    if not Path(REQUIREMENTS).exists():
+        print(f"Error: {REQUIREMENTS} not found.")
+        sys.exit(1)
+
+    print("Upgrading pip...")
+    run_command(f'"{pip}" install --upgrade pip')
+
+    print(f"Installing packages from {REQUIREMENTS}...")
+    run_command(f'"{pip}" install -r {REQUIREMENTS}')
+    print("  All packages installed.")
+
+
+def run_pipeline():
+    python = get_python_path()
+    print("\n" + "=" * 50)
+    print("Running pipeline...")
+    print("=" * 50 + "\n")
+    run_command(f'"{python}" main.py')
+
+
+def main():
+    check_python_version()
+
+    if is_venv_ready():
+        print("Environment already set up — skipping install.")
+    else:
+        create_venv()
+        install_requirements()
+
+    run_pipeline()
+
+
+if __name__ == "__main__":
+    main()
+
+
+####################################################################################################
+# FILE: tests/test_suite.py
+####################################################################################################
+
+import numpy as np
+import pandas as pd
+import pytest
+
+
+# ==============================================================
+# CREDIT MODEL
+# ==============================================================
+
+class TestCreditModel:
+
+    def setup_method(self):
+        from models.credit_model import CreditModel
+        self.model = CreditModel()
+
+    def test_pd_valid(self):
+        pd_val = self.model.predict_pd(5, 2.5)
+        assert 0 < pd_val < 1
+
+    def test_sensitivity(self):
+        sens = self.model.sensitivity()
+        assert "unemployment_shock_delta" in sens
+
+
+# ==============================================================
+# VAR MODEL
+# ==============================================================
+
+class TestVARModel:
+
+    def setup_method(self):
+        from models.var_model import VARModel
+        self.VARModel = VARModel
+
+    def test_fit_forecast(self, sample_macro_df):
+        model = self.VARModel(lags=1)
+        model.fit(sample_macro_df)
+        fc = model.forecast()
+        assert fc.shape == (1, 2)
+
+
+# ==============================================================
+# PIPELINE
+# ==============================================================
+
+class TestPipeline:
+
+    def test_pipeline(self):
+        from pipeline.run_pipeline import run_pipeline
+
+        result = run_pipeline(run_stress=False)
+
+        assert "predicted_pd" in result
+        assert "var_lags_used" in result
+        assert "stationarity" in result
+
+
+####################################################################################################
+# FILE: tools/export_codebase.py
+####################################################################################################
+
+"""
+tools/export_codebase.py
+------------------------
+Interactive codebase exporter.
+
+- Asks user permission
+- Anchors to true project root (not cwd)
+- Recursively scans ALL project files safely
+- Collects:
+    - all .py files
+    - Makefile
+- Excludes venv, caches, git, build artifacts
+- Writes timestamped snapshot into tools/snapshots/
+"""
+
+from pathlib import Path
+from datetime import datetime
+import sys
+
+
+# ------------------------------------------------------------
+# ROOT DETECTION
+# ------------------------------------------------------------
+def find_project_root(current_path: Path) -> Path:
+    """
+    Walk upward until we find project markers.
+    We assume root contains core folders like:
+        - models/
+        - pipeline/
+        - api/
+    """
+    for parent in [current_path] + list(current_path.parents):
+        if (parent / "models").exists() and (parent / "pipeline").exists():
+            return parent
+    return current_path.parent
+
+
+# ------------------------------------------------------------
+# FILE COLLECTION (FIXED)
+# ------------------------------------------------------------
+def collect_project_files(root: Path):
+    """
+    Collect ALL project-relevant files safely.
+
+    Strategy:
+    - Walk entire tree
+    - Exclude noise directories (venv, cache, etc.)
+    - Include ALL valid project modules regardless of depth
+    - Explicitly include Makefile
+    """
+
+    ignored_dirs = {
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".git",
+        ".idea",
+        ".pytest_cache",
+        ".mypy_cache",
+        "build",
+        "dist",
+        "snapshots",
+        "site-packages",
+    }
+
+    files = []
+
+    for path in root.rglob("*"):
+
+        # only Python files + Makefile
+        if not (path.name.endswith(".py") or path.name == "Makefile"):
+            continue
+
+        # skip non-files
+        if not path.is_file():
+            continue
+
+        # skip hidden paths anywhere (.git, .env, etc.)
+        if any(part.startswith(".") for part in path.parts):
+            continue
+
+        # skip ignored dirs anywhere in path
+        if any(part in ignored_dirs for part in path.parts):
+            continue
+
+        files.append(path)
+
+    return sorted(set(files))
+
+
+# ------------------------------------------------------------
+# SNAPSHOT BUILDER
+# ------------------------------------------------------------
+def build_snapshot(root: Path, files: list[Path]) -> str:
+    """
+    Combine all code into one structured snapshot.
+    """
+
+    snapshot = []
+    snapshot.append("# CODEBASE SNAPSHOT\n")
+    snapshot.append(f"# Root: {root}\n")
+    snapshot.append(f"# Generated: {datetime.now().isoformat()}\n\n")
+    snapshot.append("=" * 100 + "\n")
+
+    for f in files:
+        rel = f.relative_to(root)
+
+        snapshot.append("\n\n")
+        snapshot.append("#" * 100 + "\n")
+        snapshot.append(f"# FILE: {rel}\n")
+        snapshot.append("#" * 100 + "\n\n")
+
+        try:
+            content = f.read_text(encoding="utf-8")
+        except Exception as e:
+            content = f"# ERROR READING FILE: {e}"
+
+        snapshot.append(content)
+        snapshot.append("\n")
+
+    return "".join(snapshot)
+
+
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
+def main():
+    print("\nCODEBASE EXPORT TOOL")
+    print("====================\n")
+
+    answer = input(
+        "Would you like to export the full codebase snapshot for 'credit_model_project'? (y/n): "
+    ).strip().lower()
+
+    if answer != "y":
+        if answer == "n":
+            print("Okay thanks — snapshot not created.")
+            sys.exit(0)
+        else:
+            print("Please enter 'y' for yes or 'n' for no.")
+            sys.exit(1)
+
+    # Anchor to script location
+    script_path = Path(__file__).resolve()
+    tools_dir = script_path.parent
+    project_root = find_project_root(tools_dir)
+
+    print(f"\nDetected project root: {project_root}")
+
+    files = collect_project_files(project_root)
+
+    print(f"Found {len(files)} project files")
+
+    snapshot = build_snapshot(project_root, files)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    snapshot_dir = project_root / "tools" / "snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    output_file = snapshot_dir / f"codebase_snapshot_{timestamp}.txt"
+
+    output_file.write_text(snapshot, encoding="utf-8")
+
+    print("\nDONE")
+    print(f"Snapshot saved to:\n{output_file}\n")
+
+
+if __name__ == "__main__":
+    main()
+
+
+####################################################################################################
+# FILE: utils/logger.py
+####################################################################################################
+
+"""
+utils/logger.py
+---------------
+Simple production-style logger used across pipeline.
+"""
+
+import logging
+
+
+def get_logger(name: str):
+    logger = logging.getLogger(name)
+
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s - %(name)s: %(message)s"
+        )
+
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
+
+
+####################################################################################################
+# FILE: utils/run_metadata.py
+####################################################################################################
+
+"""
+utils/run_metadata.py
+---------------------
+Now stores full experiment metadata for:
+- run history dashboard
+- model comparison
+- research reproducibility
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+
+RUN_DIR = Path("runs")
+
+
+def save_run_metadata(result: dict):
+    RUN_DIR.mkdir(exist_ok=True)
+
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "experiment_id": result.get("experiment_id"),
+        "model_version": result.get("model_version"),
+
+        "pd": result.get("predicted_pd"),
+        "rating": result.get("rating"),
+
+        "forecast": result.get("forecast"),
+    }
+
+    file_path = RUN_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    with open(file_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+    return str(file_path)
+
+
+####################################################################################################
+# FILE: utils/serialization.py
+####################################################################################################
+
+# utils/serialization.py
+
+import numpy as np
+import pandas as pd
+from datetime import datetime
+
+
+def to_json_safe(obj):
+    """
+    Recursively convert anything into JSON-safe Python primitives.
+    This is the SINGLE source of truth for all logging + storage.
+    """
+
+    # NumPy scalars (int64, float64, etc.)
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    # NumPy arrays
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # Pandas Timestamp
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+
+    # Datetime
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+
+    # Dict
+    if isinstance(obj, dict):
+        return {k: to_json_safe(v) for k, v in obj.items()}
+
+    # List / tuple
+    if isinstance(obj, (list, tuple)):
+        return [to_json_safe(v) for v in obj]
+
+    return obj

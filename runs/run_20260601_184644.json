@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-06-01T18:46:44.913632",
+  "experiment_id": "54714895",
+  "model_version": null,
+  "pd": 0.007055939767388984,
+  "rating": "A",
+  "forecast": {
+    "unemployment": 4.434121747354349,
+    "inflation": 2.5505353942428215
+  }
+}

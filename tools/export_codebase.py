@@ -61,6 +61,7 @@ def collect_project_files(root: Path):
         "dist",
         "snapshots",
         "site-packages",
+        "runs",
     }
 
     files = []
@@ -68,8 +69,7 @@ def collect_project_files(root: Path):
     for path in root.rglob("*"):
 
         # only Python files + Makefile
-        if not (path.name.endswith(".py") or path.name == "Makefile"):
-            continue
+        if not (path.suffix in {".py", ".md", ".txt", ".toml", ".yml", ".yaml", ".json"} or path.name == "Makefile"):            continue
 
         # skip non-files
         if not path.is_file():
@@ -129,7 +129,7 @@ def main():
     print("====================\n")
 
     answer = input(
-        "Would you like to export the full codebase snapshot for 'credit_model_project'? (y/n): "
+        "Would you like to export the full codebase snapshot for 'macro-credit-risk-lab'? (y/n): "
     ).strip().lower()
 
     if answer != "y":

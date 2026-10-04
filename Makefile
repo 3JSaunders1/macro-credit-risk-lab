@@ -1,59 +1,48 @@
-.PHONY: all setup run api dashboard test calibrate clean help
+SHELL := /bin/bash
+.SHELLFLAGS := -o pipefail -c
 
-PYTHON := $(shell command -v python3 2>/dev/null || echo python)
-VENV_PYTHON := venv/bin/python
-VENV_PIP := venv/bin/pip
+RUN_ID  := $(shell date +%Y%m%d_%H%M%S)
+RUN_DIR := reports/runs/$(RUN_ID)
+LOG     := $(RUN_DIR)/run_log.txt
 
-# Use venv python if it exists, else system python
-ifeq ($(wildcard venv/bin/python),)
-    PY := $(PYTHON)
-else
-    PY := $(VENV_PYTHON)
-endif
+.PHONY: all run-dir setup data estimate backtest scenarios run api dashboard test archive
 
-all:            ## Setup + run pipeline
-	$(PYTHON) setup_env.py
+all: run-dir estimate backtest scenarios run archive
+	@echo "Run complete: $(RUN_DIR)"
 
-setup:          ## Create venv and install deps
-	$(PYTHON) setup_env.py
+run-dir:
+	@mkdir -p $(RUN_DIR)
 
-run:            ## Run CLI pipeline
-	$(PY) main.py
+setup:          ## Create venv and install pinned dependencies
+	python3 setup_env.py
 
-api:            ## Start FastAPI server
-	$(PY) -m uvicorn api.server:app --port 8000 --reload
+data:           ## Rebuild macro data from FRED (requires FRED_API_KEY in .env)
+	python -m pipeline.fetch_data
 
-dashboard:      ## Start Streamlit dashboard
-	$(PY) -m streamlit run dashboard/app.py
+estimate: run-dir   ## Static credit model, dynamic loss model, and its backtests
+	python -m models.credit_estimation 2>&1 | tee -a $(LOG)
+	python -m models.loss_validation 2>&1 | tee -a $(LOG)
 
-run-all:        ## Start API + dashboard together
-	@$(PY) -m uvicorn api.server:app --port 8000 --reload & \
-	sleep 2 && $(PY) -m streamlit run dashboard/app.py
+backtest: run-dir   ## Rolling out-of-sample forecast backtest
+	python -m analysis.forecast_backtest 2>&1 | tee -a $(LOG)
 
-test:           ## Run all tests
-	$(PY) -m pytest tests/ -v
+scenarios: run-dir  ## Model-based stress scenarios
+	python -m pipeline.scenario_engine 2>&1 | tee -a $(LOG)
 
-test-fast:      ## Run tests, stop on first failure
-	$(PY) -m pytest tests/ -x -v
+run: run-dir        ## CLI pipeline: forecast, credit, and stress test
+	python main.py 2>&1 | tee -a $(LOG)
 
-test-cov:       ## Run tests with coverage
-	$(PY) -m pytest tests/ --cov=. --cov-report=term-missing
+api:            ## Start the FastAPI server
+	python -m uvicorn api.server:app --port 8000 --reload
 
-calibrate-demo: ## Calibrate model on synthetic data
-	$(PY) models/calibration.py --demo
+dashboard:      ## Start the Streamlit dashboard
+	python -m streamlit run dashboard/app.py
 
-structure:      ## Print project file structure
-	$(PY) file_structure.py
+test:           ## Run the test suite
+	python -m pytest -v
 
-clean:          ## Remove venv, caches, build artifacts
-	rm -rf venv __pycache__ .pytest_cache htmlcov
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -name "*.pyc" -delete
-
-kill-ports:     ## Kill processes on port 8000
-	@lsof -ti:8000 | xargs kill -9 2>/dev/null || true
-	@pkill -f streamlit 2>/dev/null || true
-
-help:           ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+archive: run-dir
+	cp reports/figures/* $(RUN_DIR)/
+	cp data/macro_data_meta.json config/*.json $(RUN_DIR)/
+	@echo "Run ID:     $(RUN_ID)" > $(RUN_DIR)/run_info.txt
+	@echo "Git commit: $$(git rev-parse --short HEAD 2>/dev/null || echo 'not committed')" >> $(RUN_DIR)/run_info.txt

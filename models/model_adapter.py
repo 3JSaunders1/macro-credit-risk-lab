@@ -1,14 +1,12 @@
-import numpy as np
+"""
+models/model_adapter.py
+-----------------------
+Unifies all models into one output format: forecast, forecast intervals, IRFs, FEVD.
+Every model implements forecast_interval(steps, alpha) -> (point, lower, upper).
+"""
 
 
 class ModelAdapter:
-    """
-    Unifies ALL models into:
-    - forecast
-    - forecast_ci
-    - irf
-    - fevd
-    """
 
     def __init__(self, model, model_type: str, alpha: float = 0.1):
         self.model = model
@@ -16,38 +14,20 @@ class ModelAdapter:
         self.alpha = alpha
 
     def forecast(self):
-        fc = self.model.forecast(steps=1)[0]
-
-        u = float(fc[0])
-        pi = float(fc[1])
-
-        # simple but stable CI
-        spread = 0.4
-
+        point, lower, upper = self.model.forecast_interval(steps=1, alpha=self.alpha)
         return {
-            "forecast": {
-                "unemployment": u,
-                "inflation": pi
-            },
+            "forecast": {"unemployment": float(point[0][0]), "inflation": float(point[0][1])},
             "forecast_ci": {
-                "unemployment": {"lower": u - spread, "upper": u + spread},
-                "inflation": {"lower": pi - spread, "upper": pi + spread}
-            }
+                "unemployment": {"lower": float(lower[0][0]), "upper": float(upper[0][0])},
+                "inflation": {"lower": float(lower[0][1]), "upper": float(upper[0][1])},
+            },
         }
 
     def irf(self):
         irf_obj = self.model.irf()
-
-        return {
-            "irfs": irf_obj.irfs,
-            "fevd": irf_obj.fevd,
-            "model_type": self.model_type
-        }
+        return {"irfs": irf_obj.irfs, "fevd": irf_obj.fevd, "model_type": self.model_type}
 
     def diagnostics(self):
         if hasattr(self.model, "diagnostics"):
             return self.model.diagnostics()
-        return {
-            "var_lags_used": None,
-            "var_stability": None
-        }
+        return {"var_lags_used": None, "var_stability": None}

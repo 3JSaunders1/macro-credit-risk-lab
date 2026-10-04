@@ -1,209 +1,108 @@
 """
 models/bvar.py
 --------------
-Bayesian VAR with Minnesota Prior.
+Bayesian VAR with a Minnesota prior, implemented with dummy observations
+(Banbura, Giannone and Reichlin 2010).
 
-The Minnesota prior (Litterman 1986) shrinks VAR coefficients toward
-a random walk for each variable, preventing overfitting in short macro
-samples. This is standard in central bank forecasting (NY Fed, ECB).
-
-The prior assumes:
-  - Own lags: shrink toward 1 for lag 1, 0 for higher lags
-  - Cross-variable lags: shrink toward 0
-  - Tighter = more shrinkage toward the prior (lambda controls this)
-
-Why this matters for the portfolio:
-  - Minnesota prior BVAR is the workhorse model at most central banks
-  - Mentioning it in an interview at a credit/risk firm signals you know
-    the forecasting literature, not just sklearn
+Prior: each variable follows its own AR(1) (coefficient delta_i on its own first
+lag, estimated and capped at 1), every other coefficient is centered at zero,
+and shrinkage tightens at longer lags (prior scale ~ lambda / lag). Smaller
+lambda means more shrinkage toward the prior.
 """
-
 import numpy as np
 import pandas as pd
-from scipy import linalg
 from models.interfaces import IRFBundle
+from models.var_utils import (fevd_from_irfs, forecast_mse, is_stable,
+                              ma_coefficients, normal_interval)
 
 
 class BVARModel:
-    """
-    Bayesian VAR with Minnesota prior via dummy observations.
-
-    Parameters
-    ----------
-    lags    : int   Number of lags
-    lambda_ : float Prior tightness (smaller = tighter/more shrinkage)
-    """
 
     def __init__(self, lags: int = 2, lambda_: float = 0.2):
         self.lags = lags
         self.lambda_ = lambda_
-        self.fitted = None
         self.coeffs = None
         self.sigma = None
-        self.data = None
 
-    # ------------------------------------------------------------------
-    # Minnesota dummy observations (Banbura et al. 2010 approach)
-    # ------------------------------------------------------------------
-    def _build_minnesota_dummies(self, data: np.ndarray):
-        """
-        Construct dummy observation matrices encoding the Minnesota prior.
-        Returns (Y_d, X_d) dummy data appended to real data for OLS.
-        """
-        n = data.shape[1]  # number of variables
-        p = self.lags
-        lam = self.lambda_
-
-        # Residual variance estimate (AR(1) for each variable)
-        ar_sigmas = []
-        for i in range(n):
-            y = data[1:, i]
-            x = data[:-1, i].reshape(-1, 1)
+    @staticmethod
+    def _ar1_stats(arr: np.ndarray):
+        """AR(1) coefficient and residual std for each variable (with intercept)."""
+        deltas, sigmas = [], []
+        for i in range(arr.shape[1]):
+            y, x = arr[1:, i], np.column_stack([np.ones(len(arr) - 1), arr[:-1, i]])
             b = np.linalg.lstsq(x, y, rcond=None)[0]
-            resid = y - x @ b
-            ar_sigmas.append(np.std(resid))
-        s = np.array(ar_sigmas)
+            deltas.append(float(np.clip(b[1], 0, 1)))
+            sigmas.append(float(np.std(y - x @ b, ddof=2)))
+        return np.array(deltas), np.array(sigmas)
 
-        # Dummy Y: (n*p + n) × n
-        # Dummy X: (n*p + n) × (n*p + 1)
-        rows_coeff = n * p
-        rows_sigma = n
-        total = rows_coeff + rows_sigma
-
-        Y_d = np.zeros((total, n))
-        X_d = np.zeros((total, n * p + 1))
-
-        # Coefficient dummies (shrink toward own-lag-1 = 1, others = 0)
+    def _build_minnesota_dummies(self, arr: np.ndarray):
+        n, p, lam = arr.shape[1], self.lags, self.lambda_
+        delta, s = self._ar1_stats(arr)
+        Y_d = np.zeros((n * p + n, n))
+        X_d = np.zeros((n * p + n, n * p + 1))
         for lag in range(1, p + 1):
-            for var in range(n):
-                row = (lag - 1) * n + var
-                Y_d[row, var] = s[var] / (lam * lag)
-                col = (lag - 1) * n + var + 1  # +1 for intercept
-                X_d[row, col] = s[var] / (lam * lag)
-
-        # Sigma dummies (prior on residual variance)
-        for var in range(n):
-            row = rows_coeff + var
-            Y_d[row, var] = s[var]
-            X_d[row, 0] = 0  # no intercept in sigma dummies
-
+            for i in range(n):
+                row = (lag - 1) * n + i
+                if lag == 1:
+                    Y_d[row, i] = delta[i] * s[i] / lam      # prior mean only on own first lag
+                X_d[row, 1 + (lag - 1) * n + i] = s[i] * lag / lam
+        for i in range(n):                                    # residual variance dummies
+            Y_d[n * p + i, i] = s[i]
         return Y_d, X_d
 
-    # ------------------------------------------------------------------
-    # Build OLS design matrices from data
-    # ------------------------------------------------------------------
-    def _build_ols_matrices(self, data: np.ndarray):
-        T, n = data.shape
-        p = self.lags
-
-        Y = data[p:, :]
-        X = np.ones((T - p, n * p + 1))  # intercept + lags
-
+    def _build_ols_matrices(self, arr: np.ndarray):
+        T, n, p = arr.shape[0], arr.shape[1], self.lags
+        Y = arr[p:, :]
+        X = np.ones((T - p, n * p + 1))
         for lag in range(1, p + 1):
-            X[:, 1 + (lag - 1) * n: 1 + lag * n] = data[p - lag: T - lag, :]
-
+            X[:, 1 + (lag - 1) * n: 1 + lag * n] = arr[p - lag: T - lag, :]
         return Y, X
 
-    # ------------------------------------------------------------------
-    # Fit
-    # ------------------------------------------------------------------
     def fit(self, data: pd.DataFrame) -> "BVARModel":
-        self.data = data
         arr = data.values.astype(float)
-
         Y, X = self._build_ols_matrices(arr)
         Y_d, X_d = self._build_minnesota_dummies(arr)
+        Y_aug, X_aug = np.vstack([Y, Y_d]), np.vstack([X, X_d])
+        self.coeffs = np.linalg.solve(X_aug.T @ X_aug, X_aug.T @ Y_aug)   # (n*p+1, n)
 
-        # Augment with dummies
-        Y_aug = np.vstack([Y, Y_d])
-        X_aug = np.vstack([X, X_d])
-
-        # Posterior OLS: B = (X'X)^{-1} X'Y
-        XtX = X_aug.T @ X_aug
-        XtY = X_aug.T @ Y_aug
-
-        self.coeffs = np.linalg.solve(XtX, XtY)  # shape: (n*p+1, n)
-
-        resid = Y_aug - X_aug @ self.coeffs
-        self.sigma = (resid.T @ resid) / (Y_aug.shape[0] - X_aug.shape[1])
-
-        self._last_obs = arr[-self.lags:]
-        self._n = arr.shape[1]
-        self._columns = list(data.columns)
-
+        resid = Y - X @ self.coeffs                                      # real data only
+        self.sigma = resid.T @ resid / max(Y.shape[0] - X.shape[1], 1)
+        self._last_obs, self._n = arr[-self.lags:], arr.shape[1]
         return self
 
-    # ------------------------------------------------------------------
-    # Forecast
-    # ------------------------------------------------------------------
-    def forecast(self, steps: int = 1) -> np.ndarray:
-        if self.coeffs is None:
-            raise ValueError("Model must be fit before forecasting.")
-
+    def lag_matrices(self) -> np.ndarray:
+        """A_1..A_p with shape (p, n, n), where A_l[i, j] is variable i's loading on j at lag l."""
         n, p = self._n, self.lags
-        B = self.coeffs  # (n*p+1, n)
+        return np.array([self.coeffs[1 + l * n: 1 + (l + 1) * n, :].T for l in range(p)])
 
-        history = list(self._last_obs)
-        forecasts = []
-
+    def forecast(self, steps: int = 1) -> np.ndarray:
+        n, p = self._n, self.lags
+        history, out = list(self._last_obs), []
         for _ in range(steps):
             x = np.ones(n * p + 1)
             for lag in range(p):
                 x[1 + lag * n: 1 + (lag + 1) * n] = history[-(lag + 1)]
-            y_hat = x @ B
-            forecasts.append(y_hat)
+            y_hat = x @ self.coeffs
+            out.append(y_hat)
             history.append(y_hat)
+        return np.array(out)
 
-        return np.array(forecasts)  # (steps, n)
+    def forecast_interval(self, steps: int = 1, alpha: float = 0.10):
+        point = self.forecast(steps)
+        mse = forecast_mse(self.lag_matrices(), self.sigma, steps)
+        lower, upper = normal_interval(point, np.diagonal(mse, axis1=1, axis2=2), alpha)
+        return point, lower, upper
 
-    # ------------------------------------------------------------------
-    # IRF via Cholesky (reduced-form residuals)
-    # ------------------------------------------------------------------
     def irf(self, horizon: int = 10) -> IRFBundle:
-        if self.coeffs is None:
-            raise ValueError("Must fit before computing IRF.")
-
-        n, p = self._n, self.lags
-        B = self.coeffs[1:, :].T  # (n, n*p) — drop intercept, transpose
-
-        # Companion matrix
-        k = n * p
-        companion = np.zeros((k, k))
-        companion[:n, :] = B
-        companion[n:, :-n] = np.eye(k - n)
-
-        # Cholesky structural identification
         try:
             P = np.linalg.cholesky(self.sigma)
         except np.linalg.LinAlgError:
-            P = np.eye(n)
-
-        irfs = []
-        Ak = np.eye(k)
-        for _ in range(horizon):
-            response = Ak[:n, :n] @ P
-            irfs.append(response)
-            Ak = Ak @ companion
-
-        # FEVD
-        mse = np.zeros((n, n))
-        fevd = np.zeros((horizon, n, n))
-        for h in range(horizon):
-            shock_contrib = np.array([
-                irfs[h][:, j] ** 2 for j in range(n)
-            ]).T  # (n, n)
-            mse += shock_contrib
-            fevd[h] = mse / (mse.sum(axis=1, keepdims=True) + 1e-10)
-
-        return IRFBundle(
-            irfs=[irfs[i] for i in range(horizon)],
-            fevd=fevd,
-            model_type="bvar_minnesota"
-        )
+            P = np.eye(self._n)
+        irfs = ma_coefficients(self.lag_matrices(), horizon) @ P
+        return IRFBundle(irfs=[irfs[h] for h in range(horizon)],
+                         fevd=fevd_from_irfs(irfs), model_type="bvar_minnesota")
 
     def diagnostics(self) -> dict:
-        return {
-            "var_lags_used": self.lags,
-            "var_stability": None,  # TODO: check companion eigenvalues
-            "bvar_lambda": self.lambda_,
-        }
+        return {"var_lags_used": self.lags,
+                "var_stability": is_stable(self.lag_matrices()),
+                "bvar_lambda": self.lambda_}

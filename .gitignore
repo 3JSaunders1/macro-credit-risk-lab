@@ -15,3 +15,4 @@ tools/snapshots/
 
 # macOS
 .DS_Store
+data/legacy_macro_data.csv

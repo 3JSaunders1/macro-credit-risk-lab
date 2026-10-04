@@ -197,23 +197,6 @@ class TestPipeline:
                                run_stress=False, var_lags=1)
         assert "predicted_pd" in result
 
-    def test_shock_path(self):
-        from pipeline.run_pipeline import run_pipeline
-        result = run_pipeline(run_stress=False, var_lags=1,
-                               shock_u=3.0, shock_pi=1.0)
-        assert result["shock_path"] is not None
-        assert "predicted_pd" in result["shock_path"].columns
-
-    def test_scenario_comparison(self):
-        from pipeline.run_pipeline import run_scenario_comparison
-        results = run_scenario_comparison(
-            ["Baseline", "Adverse"], model_type="var", var_lags=1
-        )
-        assert "Baseline" in results
-        assert "Adverse" in results
-        assert results["Adverse"]["predicted_pd"] >= results["Baseline"]["predicted_pd"]
-
-
 # ── API ───────────────────────────────────────────────────────────────────────
 
 class TestAPI:

@@ -34,7 +34,8 @@ class VARModel:
     def irf(self, horizon=10):
         irf_obj = self.fitted.irf(horizon)
         irfs = [irf_obj.irfs[i] for i in range(irf_obj.irfs.shape[0])]
-        return IRFBundle(irfs=irfs, fevd=self.fitted.fevd(horizon).decomp, model_type="var")
+        fevd = np.transpose(self.fitted.fevd(horizon).decomp, (1, 0, 2))   # (horizon, variable, shock)
+        return IRFBundle(irfs=irfs, fevd=fevd, model_type="var")
 
     def diagnostics(self):
         return {"var_lags_used": self.lags,

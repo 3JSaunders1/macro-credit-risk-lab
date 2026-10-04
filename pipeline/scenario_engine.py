@@ -93,19 +93,24 @@ def run_scenarios(lags: int = 2, lambda_: float = 0.2):
     return results, history
 
 
+def scenario_summary(results: dict | None = None) -> pd.DataFrame:
+    """One row per scenario: peak macro values, peak loss rate, and 9-quarter cumulative loss."""
+    if results is None:
+        results, _ = run_scenarios()
+    return pd.DataFrame([{
+        "scenario": name,
+        "peak_unemployment": float(path["unemployment"].max()),
+        "peak_inflation": float(path["inflation"].max()),
+        "peak_loss_rate_pct": float(path["loss_rate"].max() * 100),
+        "cumulative_9q_loss_pct": cumulative_loss(path["loss_rate"]) * 100,
+    } for name, path in results.items()])
+
+
 def main():
     results, history = run_scenarios()
     start = history["charge_off_rate"].dropna().iloc[-1]
     ref = history.loc[REFERENCE_2008[0]:REFERENCE_2008[1], "charge_off_rate"] / 100
-
-    rows = []
-    for name, path in results.items():
-        rows.append({"scenario": name,
-                     "peak_unemployment": path["unemployment"].max(),
-                     "peak_inflation": path["inflation"].max(),
-                     "peak_loss_rate_pct": path["loss_rate"].max() * 100,
-                     "cumulative_9q_loss_pct": cumulative_loss(path["loss_rate"]) * 100})
-    summary = pd.DataFrame(rows)
+    summary = scenario_summary(results)
 
     print(f"Scenarios start {results['Baseline'].index[0].date()}; "
           f"latest actual charge-off rate {start:.2f}%")

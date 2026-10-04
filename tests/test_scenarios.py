@@ -42,3 +42,17 @@ def test_losses_rise_with_severity(results):
     adverse = cumulative_loss(results["Adverse"]["loss_rate"])
     severe = cumulative_loss(results["Severely Adverse"]["loss_rate"])
     assert base < adverse < severe
+
+
+def test_summary_has_one_row_per_configured_scenario():
+    from pipeline.scenario_engine import scenario_summary
+    summary = scenario_summary()
+    assert list(summary["scenario"]) == list(SCENARIOS)
+    assert {"peak_loss_rate_pct", "cumulative_9q_loss_pct"} <= set(summary.columns)
+
+
+def test_api_stress_test_uses_configured_scenarios():
+    from fastapi.testclient import TestClient
+    from api.server import app
+    rows = TestClient(app).get("/stress_test").json()
+    assert [r["scenario"] for r in rows] == list(SCENARIOS)

@@ -225,9 +225,7 @@ if tab_selected == "🏠 Overview":
     if result.get("stress_test") is not None:
         st.markdown("---")
         st.subheader("Stress Test")
-        stress = result["stress_test"].copy()
-        stress["predicted_pd"] = stress["predicted_pd"].map("{:.2%}".format)
-        st.dataframe(stress, use_container_width=True, hide_index=True)
+        st.dataframe(result["stress_test"].round(2), use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

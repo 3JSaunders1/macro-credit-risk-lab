@@ -18,7 +18,8 @@ import pandas as pd
 from statsmodels.tsa.stattools import adfuller
 
 from config.settings import settings
-from models.credit_model import CreditModel, StressScenario
+from models.credit_model import CreditModel
+from pipeline.scenario_engine import scenario_summary
 from models.model_adapter import ModelAdapter
 from models.var_model import VARModel
 from models.svar_cholesky import SVARCholesky
@@ -157,16 +158,8 @@ def run_pipeline(
     rating = credit.pd_to_rating(pd_hat)
     sensitivity = credit.sensitivity(u=u_hat, pi=pi_hat, shock=shock)
 
-    stress_df = None
-    if run_stress:
-        scenarios = [
-            StressScenario("Baseline", 4.0, 2.5),
-            StressScenario("Adverse", 7.0, 4.0),
-            StressScenario("Severe", 12.0, 1.5),
-            StressScenario("Stagflation", 8.0, 9.0),
-            StressScenario("COVID", 15.0, 0.5),
-        ]
-        stress_df = credit.stress_test(scenarios)
+    # Stress test: model-based scenarios from config/scenarios.py
+    stress_df = scenario_summary() if run_stress else None
 
     # Shock path
     shock_path_df = None

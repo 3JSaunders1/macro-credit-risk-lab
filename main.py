@@ -14,7 +14,7 @@ def print_section(title: str):
 
 
 def main():
-    result = run_fresh_pipeline()
+    result = run_fresh_pipeline(save_metadata=True)
 
     # -------------------------
     # FORECAST

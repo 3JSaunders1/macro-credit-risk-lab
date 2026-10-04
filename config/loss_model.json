@@ -1,0 +1,22 @@
+{
+  "params": {
+    "const": -0.33552508930228625,
+    "lag_logit_loss": 0.9137179385823498,
+    "d4_unemployment": 0.037671957736215865,
+    "inflation": 0.011699627469932994,
+    "bankruptcy_2005q4": 0.01755716018571893,
+    "bankruptcy_2006q1": -0.5389358974635503,
+    "covid_policy": -0.2604813305633717
+  },
+  "features": [
+    "lag_logit_loss",
+    "d4_unemployment",
+    "inflation",
+    "bankruptcy_2005q4",
+    "bankruptcy_2006q1",
+    "covid_policy"
+  ],
+  "target": "consumer loan charge-off rate (CORCACBS), as a fraction",
+  "model": "dynamic fractional logit, HAC standard errors",
+  "sample": "1986-01-01 to 2026-04-01"
+}

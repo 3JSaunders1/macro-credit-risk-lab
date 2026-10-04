@@ -1,9 +1,17 @@
+# Secrets
+.env
+
+# Python
 venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+htmlcov/
+
+# Generated outputs
 runs/
 models/artifacts/
-htmlcov/
-.DS_Store.env
-.env
+tools/snapshots/
+
+# macOS
+.DS_Store

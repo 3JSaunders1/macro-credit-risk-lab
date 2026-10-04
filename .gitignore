@@ -6,3 +6,4 @@ runs/
 models/artifacts/
 htmlcov/
 .DS_Store.env
+.env

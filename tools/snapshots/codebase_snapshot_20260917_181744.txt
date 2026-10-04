@@ -1,0 +1,3025 @@
+# CODEBASE SNAPSHOT
+# Root: /Users/adamsmith/Desktop/credit_model_project
+# Generated: 2026-09-17T18:17:44.912983
+
+====================================================================================================
+
+
+####################################################################################################
+# FILE: Makefile
+####################################################################################################
+
+.PHONY: all setup run api dashboard test calibrate clean help
+
+PYTHON := $(shell command -v python3 2>/dev/null || echo python)
+VENV_PYTHON := venv/bin/python
+VENV_PIP := venv/bin/pip
+
+# Use venv python if it exists, else system python
+ifeq ($(wildcard venv/bin/python),)
+    PY := $(PYTHON)
+else
+    PY := $(VENV_PYTHON)
+endif
+
+all:            ## Setup + run pipeline
+	$(PYTHON) setup_env.py
+
+setup:          ## Create venv and install deps
+	$(PYTHON) setup_env.py
+
+run:            ## Run CLI pipeline
+	$(PY) main.py
+
+api:            ## Start FastAPI server
+	$(PY) -m uvicorn api.server:app --port 8000 --reload
+
+dashboard:      ## Start Streamlit dashboard
+	$(PY) -m streamlit run dashboard/app.py
+
+run-all:        ## Start API + dashboard together
+	@$(PY) -m uvicorn api.server:app --port 8000 --reload & \
+	sleep 2 && $(PY) -m streamlit run dashboard/app.py
+
+test:           ## Run all tests
+	$(PY) -m pytest tests/ -v
+
+test-fast:      ## Run tests, stop on first failure
+	$(PY) -m pytest tests/ -x -v
+
+test-cov:       ## Run tests with coverage
+	$(PY) -m pytest tests/ --cov=. --cov-report=term-missing
+
+calibrate-demo: ## Calibrate model on synthetic data
+	$(PY) models/calibration.py --demo
+
+structure:      ## Print project file structure
+	$(PY) file_structure.py
+
+clean:          ## Remove venv, caches, build artifacts
+	rm -rf venv __pycache__ .pytest_cache htmlcov
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" -delete
+
+kill-ports:     ## Kill processes on port 8000
+	@lsof -ti:8000 | xargs kill -9 2>/dev/null || true
+	@pkill -f streamlit 2>/dev/null || true
+
+help:           ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+
+
+####################################################################################################
+# FILE: analysis/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: analysis/compare_runs.py
+####################################################################################################
+
+import numpy as np
+
+
+def compare_irfs(irf_a, irf_b):
+    return irf_a.irfs - irf_b.irfs
+
+
+def compare_forecasts(run_a, run_b):
+    return {
+        "pd_diff": run_a["predicted_pd"] - run_b["predicted_pd"],
+        "u_diff": run_a["forecast"]["unemployment"] - run_b["forecast"]["unemployment"],
+        "pi_diff": run_a["forecast"]["inflation"] - run_b["forecast"]["inflation"],
+    }
+
+
+def compare_feved(fevd_a, fevd_b):
+    return fevd_a.decomp - fevd_b.decomp
+
+
+####################################################################################################
+# FILE: api/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: api/server.py
+####################################################################################################
+
+"""
+api/server.py
+-------------
+FastAPI REST API exposing the Macro-Driven Credit Scoring System.
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from services.pipeline_service import run_fresh_pipeline
+from models.credit_model import CreditModel, StressScenario
+from utils.serialization import to_json_safe
+
+app = FastAPI(title="Macro Credit Risk API", version="1.0.0")
+
+
+class MacroInputs(BaseModel):
+    unemployment: float = Field(..., ge=0, le=30)
+    inflation: float = Field(..., ge=-5, le=30)
+
+
+class PDResponse(BaseModel):
+    unemployment: float
+    inflation: float
+    predicted_pd: float
+    rating: str
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/forecast_and_score")
+def forecast_and_score():
+    try:
+        result = run_fresh_pipeline(run_stress=False)
+        safe = {
+            "experiment_id": result["experiment_id"],
+            "model_type":    result["model_type"],
+            "forecast":      result["forecast"],
+            "forecast_ci":   result["forecast_ci"],
+            "predicted_pd":  result["predicted_pd"],
+            "rating":        result["rating"],
+            "sensitivity":   result["sensitivity"],
+            "stationarity":  result["stationarity"],
+            "var_lags_used": result.get("var_lags_used"),
+            "var_stability": result.get("var_stability"),
+        }
+        return JSONResponse(content=to_json_safe(safe))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/score", response_model=PDResponse)
+def score(inputs: MacroInputs):
+    model = CreditModel()
+    pd_val = model.predict_pd(inputs.unemployment, inputs.inflation)
+    return PDResponse(
+        unemployment=inputs.unemployment,
+        inflation=inputs.inflation,
+        predicted_pd=pd_val,
+        rating=model.pd_to_rating(pd_val),
+    )
+
+
+@app.get("/stress_test")
+def stress_test():
+    model = CreditModel()
+    scenarios = [
+        StressScenario("Baseline", 4, 2.5),
+        StressScenario("Adverse", 7, 4),
+        StressScenario("Severe", 12, 1.5),
+        StressScenario("Stagflation", 8, 9),
+        StressScenario("COVID", 15, 0.5),
+    ]
+    return model.stress_test(scenarios).to_dict(orient="records")
+
+
+####################################################################################################
+# FILE: config/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: config/settings.py
+####################################################################################################
+
+# config/settings.py
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass
+class Settings:
+    DATA_PATH: str = "data/macro_data.csv"
+
+    # VAR
+    MAX_VAR_LAGS: int = 8
+    VAR_LAGS: Optional[int] = 2
+
+    # Confidence intervals
+    STRESS_ALPHA: float = 0.10
+
+    # Credit model betas (calibrated priors)
+    BETA_U: float = 0.18
+    BETA_PI: float = 0.10
+    BETA_0: float = -6.0
+
+    # IRF horizon
+    IRF_HORIZON: int = 12
+
+    # Shock engine
+    DEFAULT_SHOCK_SIZE: float = 1.0
+    DEFAULT_SHOCK_HORIZON: int = 8
+
+    # BVAR Minnesota prior
+    BVAR_LAMBDA: float = 0.2   # tightness
+    BVAR_LAGS: int = 2
+
+    # Local projections
+    LP_HORIZON: int = 12
+    LP_LAGS: int = 2
+
+
+settings = Settings()
+
+
+####################################################################################################
+# FILE: dashboard/app.py
+####################################################################################################
+
+"""
+dashboard/app.py
+----------------
+Streamlit dashboard: interactive macro credit risk lab.
+
+Features:
+  - Model selection: VAR / SVAR-Cholesky / SVAR-Sign / BVAR / LP
+  - IRF + FEVD visualization
+  - PD gauge + stress test
+  - Scenario comparison (2-5 worlds side by side)
+  - Shock path engine (dynamic PD trajectory)
+  - Run history + replay
+  - Sensitivity heatmap
+"""
+
+import sys
+from pathlib import Path
+import json
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT))
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+from pipeline.run_pipeline import (
+    run_pipeline, run_scenario_comparison,
+    build_shock_path, compute_pd_path, NAMED_SCENARIOS, load_data,
+)
+from models.credit_model import CreditModel
+
+# ── Page config ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Macro Credit Risk Lab",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+COLORS = {
+    "primary": "#1f3a5f",
+    "accent":  "#2e86ab",
+    "warning": "#e07a5f",
+    "green":   "#3d9970",
+    "grey":    "#8d99ae",
+}
+
+RATING_COLOR = {
+    "AAA": "#3d9970", "AA": "#3d9970", "A": "#3d9970",
+    "BBB": "#f9c74f", "BB": "#f9c74f",
+    "B": "#e07a5f", "CCC": "#e07a5f", "D": "#c1121f",
+}
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+st.sidebar.title("⚙️ Controls")
+
+tab_selected = st.sidebar.radio(
+    "View",
+    ["🏠 Overview", "📈 IRF / FEVD", "⚡ Shock Engine",
+     "🌍 Scenario Comparison", "🕘 Run History"],
+    label_visibility="collapsed",
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Model Settings")
+
+model_type = st.sidebar.selectbox(
+    "Model Type",
+    ["var", "svar_cholesky", "svar_sign", "bvar", "local_projections"],
+    format_func=lambda x: {
+        "var": "VAR",
+        "svar_cholesky": "SVAR (Cholesky)",
+        "svar_sign": "SVAR (Sign Restrictions)",
+        "bvar": "BVAR (Minnesota Prior)",
+        "local_projections": "Local Projections",
+    }[x],
+)
+
+var_lags = st.sidebar.slider("Lag Order", 1, 8, 2)
+alpha = st.sidebar.slider("CI Level (α)", 0.05, 0.30, 0.10, step=0.05)
+shock_size = st.sidebar.slider("Sensitivity Shock (pp)", 0.5, 3.0, 1.0, step=0.5)
+
+st.sidebar.markdown("---")
+run_btn = st.sidebar.button("▶ Run Pipeline", use_container_width=True)
+
+# ── Session state ──────────────────────────────────────────────────────────────
+if "result" not in st.session_state:
+    st.session_state.result = None
+if "run_history" not in st.session_state:
+    st.session_state.run_history = []
+if "comparison_results" not in st.session_state:
+    st.session_state.comparison_results = None
+
+params_key = (model_type, var_lags, alpha, shock_size)
+if "last_params" not in st.session_state:
+    st.session_state.last_params = None
+
+# Auto-run or manual run
+if run_btn or st.session_state.last_params != params_key:
+    st.session_state.last_params = params_key
+    with st.spinner("Running pipeline..."):
+        try:
+            result = run_pipeline(
+                model_type=model_type,
+                var_lags=var_lags,
+                alpha=alpha,
+                shock=shock_size,
+                run_stress=True,
+            )
+            st.session_state.result = result
+            st.session_state.run_history.append({
+                "id": result["experiment_id"],
+                "model": model_type,
+                "lags": var_lags,
+                "pd": result["predicted_pd"],
+                "rating": result["rating"],
+                "u_forecast": result["forecast"]["unemployment"],
+                "pi_forecast": result["forecast"]["inflation"],
+            })
+        except Exception as e:
+            st.error(f"Pipeline error: {e}")
+
+result = st.session_state.result
+
+# ── Helper: guard ──────────────────────────────────────────────────────────────
+def require_result():
+    if result is None:
+        st.info("Click **▶ Run Pipeline** to get started.")
+        st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: OVERVIEW
+# ══════════════════════════════════════════════════════════════════════════════
+if tab_selected == "🏠 Overview":
+    st.title("📊 Macro Credit Risk Lab")
+    st.caption("VAR · SVAR · BVAR · Local Projections · Credit Risk · Stress Testing")
+
+    require_result()
+
+    # KPI row
+    fc = result["forecast"]
+    ci = result["forecast_ci"]
+    pd_val = result["predicted_pd"]
+    rating = result["rating"]
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Unemployment Forecast", f"{fc['unemployment']:.2f}%",
+              f"CI: [{ci['unemployment']['lower']:.1f}, {ci['unemployment']['upper']:.1f}]")
+    c2.metric("Inflation Forecast", f"{fc['inflation']:.2f}%",
+              f"CI: [{ci['inflation']['lower']:.1f}, {ci['inflation']['upper']:.1f}]")
+    c3.metric("Probability of Default", f"{pd_val:.2%}")
+    c4.metric("Internal Rating", rating)
+    c5.metric("Model", result["model_type"].upper().replace("_", " "))
+
+    st.markdown("---")
+
+    col_left, col_right = st.columns(2)
+
+    # Macro history
+    with col_left:
+        st.subheader("Macro History")
+        df = load_data()
+        df_plot = pd.read_csv(ROOT / "data/macro_data.csv", parse_dates=["date"])
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            subplot_titles=["Unemployment (%)", "Inflation (%)"],
+                            vertical_spacing=0.08)
+        fig.add_trace(go.Scatter(x=df_plot["date"], y=df_plot["unemployment"],
+                                 line=dict(color=COLORS["primary"], width=2),
+                                 name="Unemployment"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_plot["date"], y=df_plot["inflation"],
+                                 line=dict(color=COLORS["accent"], width=2),
+                                 name="Inflation"), row=2, col=1)
+        fig.update_layout(height=350, showlegend=False, margin=dict(t=30, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # PD Gauge
+    with col_right:
+        st.subheader("PD Gauge")
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=pd_val * 100,
+            number=dict(suffix="%", valueformat=".2f"),
+            title=dict(text=f"PD — Rating: {rating}"),
+            gauge=dict(
+                axis=dict(range=[0, 25], ticksuffix="%"),
+                bar=dict(color=RATING_COLOR.get(rating, COLORS["grey"])),
+                steps=[
+                    dict(range=[0, 2], color="#e8f5e9"),
+                    dict(range=[2, 5], color="#fff9c4"),
+                    dict(range=[5, 15], color="#ffe0b2"),
+                    dict(range=[15, 25], color="#ffcdd2"),
+                ],
+            ),
+        ))
+        fig_gauge.update_layout(height=280, margin=dict(t=30, b=10))
+        st.plotly_chart(fig_gauge, use_container_width=True)
+
+        # Sensitivity
+        sens = result["sensitivity"]
+        st.caption("Sensitivity to 1pp macro shocks")
+        s1, s2 = st.columns(2)
+        s1.metric("Δ Unemployment +1pp", f"{sens['unemployment_shock_delta']:+.3%}")
+        s2.metric("Δ Inflation +1pp", f"{sens['inflation_shock_delta']:+.3%}")
+
+    # Stationarity
+    st.markdown("---")
+    st.subheader("Stationarity (ADF Tests)")
+    stat = result.get("stationarity", {})
+    if stat:
+        stat_df = pd.DataFrame([
+            {
+                "Variable": k.capitalize(),
+                "ADF Stat": f"{v['adf_stat']:.4f}",
+                "p-value": f"{v['p_value']:.4f}",
+                "Stationary": "✅ Yes" if v["stationary"] else "❌ No",
+            }
+            for k, v in stat.items()
+        ])
+        st.dataframe(stat_df, use_container_width=True, hide_index=True)
+
+    # Stress test
+    if result.get("stress_test") is not None:
+        st.markdown("---")
+        st.subheader("Stress Test")
+        stress = result["stress_test"].copy()
+        stress["predicted_pd"] = stress["predicted_pd"].map("{:.2%}".format)
+        st.dataframe(stress, use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: IRF / FEVD
+# ══════════════════════════════════════════════════════════════════════════════
+elif tab_selected == "📈 IRF / FEVD":
+    st.title("📈 Impulse Response Functions & FEVD")
+    require_result()
+
+    irf_data = result.get("irf", {})
+    irfs = irf_data.get("irfs", [])
+    fevd = irf_data.get("fevd", None)
+
+    if not irfs:
+        st.warning("No IRF data available for this model/run.")
+        st.stop()
+
+    variables = ["Unemployment", "Inflation"]
+    horizon = list(range(len(irfs)))
+
+    shock_var = st.selectbox("Shock Variable", variables)
+    shock_idx = variables.index(shock_var)
+
+    st.subheader(f"Responses to a {shock_var} Shock")
+
+    fig_irf = make_subplots(rows=1, cols=2,
+                             subplot_titles=[f"{v} Response" for v in variables])
+
+    for resp_idx, resp_var in enumerate(variables):
+        vals = [float(irfs[h][resp_idx, shock_idx]) for h in horizon]
+        fig_irf.add_trace(
+            go.Scatter(x=horizon, y=vals,
+                       mode="lines+markers",
+                       line=dict(color=COLORS["primary"] if resp_idx == 0 else COLORS["accent"],
+                                 width=2.5),
+                       name=resp_var),
+            row=1, col=resp_idx + 1
+        )
+        fig_irf.add_hline(y=0, line_dash="dash", line_color="grey",
+                           opacity=0.5, row=1, col=resp_idx + 1)
+
+    fig_irf.update_layout(height=380, showlegend=False,
+                           xaxis_title="Horizon (quarters)",
+                           xaxis2_title="Horizon (quarters)")
+    st.plotly_chart(fig_irf, use_container_width=True)
+
+    # FEVD
+    if fevd is not None:
+        st.markdown("---")
+        st.subheader("Forecast Error Variance Decomposition (FEVD)")
+
+        resp_var = st.selectbox("Response Variable", variables, key="fevd_var")
+        resp_idx = variables.index(resp_var)
+
+        fevd_arr = np.array(fevd)
+        if fevd_arr.ndim == 3 and fevd_arr.shape[1] >= 2:
+            h_range = list(range(fevd_arr.shape[0]))
+            fig_fevd = go.Figure()
+            for shock_i, shock_name in enumerate(variables):
+                vals = [float(fevd_arr[h, resp_idx, shock_i]) * 100
+                        for h in h_range]
+                fig_fevd.add_trace(go.Bar(
+                    x=h_range, y=vals, name=f"{shock_name} shock",
+                ))
+            fig_fevd.update_layout(
+                barmode="stack", height=350,
+                yaxis_title="Share of Variance (%)",
+                xaxis_title="Horizon (quarters)",
+            )
+            st.plotly_chart(fig_fevd, use_container_width=True)
+    else:
+        if result["model_type"] == "local_projections":
+            st.info("FEVD is not computed for Local Projections (LP-IRF). "
+                    "Use VAR or SVAR for FEVD.")
+
+    # Model info
+    st.markdown("---")
+    st.caption(f"Model: `{result['model_type']}` | "
+               f"Lags: {result.get('var_lags_used')} | "
+               f"Stable: {result.get('var_stability')}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: SHOCK ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+elif tab_selected == "⚡ Shock Engine":
+    st.title("⚡ Dynamic Shock Engine")
+    st.caption("Define a macro shock and see PD evolve over the horizon as it decays.")
+
+    require_result()
+
+    fc = result["forecast"]
+    base_u = fc["unemployment"]
+    base_pi = fc["inflation"]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Shock Parameters")
+        shock_u = st.slider("Unemployment Shock (pp)", -5.0, 15.0, 0.0, 0.5)
+        shock_pi = st.slider("Inflation Shock (pp)", -5.0, 10.0, 0.0, 0.5)
+        shock_horizon = st.slider("Horizon (quarters)", 4, 20, 8)
+        decay = st.slider("Shock Decay Rate", 0.3, 1.0, 0.7, 0.05,
+                          help="Fraction of shock remaining each period. "
+                               "1.0 = permanent, 0.5 = halves each quarter.")
+
+    with col2:
+        st.subheader("Baseline")
+        st.metric("Base Unemployment", f"{base_u:.2f}%")
+        st.metric("Base Inflation", f"{base_pi:.2f}%")
+        st.metric("Base PD", f"{result['predicted_pd']:.2%}")
+        st.metric("Base Rating", result["rating"])
+
+    credit = CreditModel()
+    shock_path = build_shock_path(base_u, base_pi, shock_u, shock_pi,
+                                   shock_horizon, decay)
+    shock_path = compute_pd_path(shock_path, credit)
+
+    st.markdown("---")
+
+    # Macro path chart
+    fig_path = make_subplots(rows=1, cols=3,
+                              subplot_titles=["Unemployment Path",
+                                              "Inflation Path",
+                                              "PD Path"])
+
+    fig_path.add_trace(
+        go.Scatter(x=shock_path["period"], y=shock_path["unemployment"],
+                   mode="lines+markers", line=dict(color=COLORS["primary"], width=2),
+                   name="Unemployment"),
+        row=1, col=1
+    )
+    fig_path.add_hline(y=base_u, line_dash="dash", line_color="grey",
+                        opacity=0.5, row=1, col=1, annotation_text="Base")
+
+    fig_path.add_trace(
+        go.Scatter(x=shock_path["period"], y=shock_path["inflation"],
+                   mode="lines+markers", line=dict(color=COLORS["accent"], width=2),
+                   name="Inflation"),
+        row=1, col=2
+    )
+    fig_path.add_hline(y=base_pi, line_dash="dash", line_color="grey",
+                        opacity=0.5, row=1, col=2, annotation_text="Base")
+
+    # PD path with rating coloring
+    for _, row_data in shock_path.iterrows():
+        color = RATING_COLOR.get(row_data["rating"], COLORS["grey"])
+        fig_path.add_trace(
+            go.Scatter(
+                x=[row_data["period"]],
+                y=[row_data["predicted_pd"] * 100],
+                mode="markers",
+                marker=dict(color=color, size=10),
+                showlegend=False,
+                hovertemplate=(
+                    f"Period {int(row_data['period'])}<br>"
+                    f"PD: {row_data['predicted_pd']:.2%}<br>"
+                    f"Rating: {row_data['rating']}<extra></extra>"
+                ),
+            ),
+            row=1, col=3
+        )
+
+    fig_path.add_trace(
+        go.Scatter(x=shock_path["period"],
+                   y=shock_path["predicted_pd"] * 100,
+                   mode="lines", line=dict(color=COLORS["warning"], width=2),
+                   name="PD"),
+        row=1, col=3
+    )
+
+    fig_path.update_layout(height=380, showlegend=False,
+                            yaxis3_ticksuffix="%",
+                            yaxis3_title="PD (%)")
+    st.plotly_chart(fig_path, use_container_width=True)
+
+    # Table
+    st.subheader("Shock Path Table")
+    display = shock_path.copy()
+    display["unemployment"] = display["unemployment"].map("{:.2f}%".format)
+    display["inflation"] = display["inflation"].map("{:.2f}%".format)
+    display["predicted_pd"] = display["predicted_pd"].map("{:.3%}".format)
+    display.rename(columns={"period": "Quarter"}, inplace=True)
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+    # Sensitivity heatmap
+    st.markdown("---")
+    st.subheader("PD Sensitivity Heatmap")
+    u_range = np.arange(1, 18, 0.5)
+    pi_range = np.arange(-2, 12, 0.5)
+    pd_grid = np.array([
+        [credit.predict_pd(float(u), float(pi)) * 100 for u in u_range]
+        for pi in pi_range
+    ])
+    fig_heat = go.Figure(go.Heatmap(
+        z=pd_grid, x=u_range, y=pi_range,
+        colorscale="RdYlGn_r",
+        colorbar=dict(title="PD (%)"),
+        hovertemplate="U: %{x}%<br>π: %{y}%<br>PD: %{z:.2f}%<extra></extra>",
+        zmin=0, zmax=20,
+    ))
+    fig_heat.add_trace(go.Scatter(
+        x=[base_u], y=[base_pi],
+        mode="markers",
+        marker=dict(size=14, color="white", symbol="star",
+                    line=dict(color="black", width=2)),
+        name="Base Forecast",
+    ))
+    if shock_u != 0 or shock_pi != 0:
+        fig_heat.add_trace(go.Scatter(
+            x=[base_u + shock_u], y=[base_pi + shock_pi],
+            mode="markers",
+            marker=dict(size=14, color=COLORS["warning"], symbol="x",
+                        line=dict(color="black", width=1)),
+            name="Shock Impact",
+        ))
+    fig_heat.update_layout(
+        height=420,
+        xaxis_title="Unemployment (%)",
+        yaxis_title="Inflation (%)",
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: SCENARIO COMPARISON
+# ══════════════════════════════════════════════════════════════════════════════
+elif tab_selected == "🌍 Scenario Comparison":
+    st.title("🌍 Scenario Comparison")
+    st.caption("Compare 2–5 macro worlds side by side: PD curves, IRFs, ratings.")
+
+    col_ctrl, col_run = st.columns([3, 1])
+    with col_ctrl:
+        selected_scenarios = st.multiselect(
+            "Select Scenarios to Compare",
+            options=list(NAMED_SCENARIOS.keys()),
+            default=["Baseline", "Adverse", "COVID Shock"],
+        )
+    with col_run:
+        st.write("")
+        st.write("")
+        compare_btn = st.button("▶ Compare", use_container_width=True)
+
+    if compare_btn and selected_scenarios:
+        if len(selected_scenarios) < 2:
+            st.warning("Select at least 2 scenarios.")
+        else:
+            with st.spinner("Running scenario comparison..."):
+                try:
+                    comparison = run_scenario_comparison(
+                        scenarios=selected_scenarios,
+                        model_type=model_type,
+                        var_lags=var_lags,
+                    )
+                    st.session_state.comparison_results = comparison
+                except Exception as e:
+                    st.error(f"Comparison error: {e}")
+
+    comparison = st.session_state.comparison_results
+
+    if not comparison:
+        st.info("Select scenarios and click ▶ Compare.")
+        st.stop()
+
+    scenario_names = list(comparison.keys())
+    palette = px.colors.qualitative.Set2
+
+    # ── KPI comparison table ─────────────────────────────────────────────────
+    st.subheader("Summary")
+    rows = []
+    for name, res in comparison.items():
+        rows.append({
+            "Scenario": name,
+            "Unemployment Shock": f"{NAMED_SCENARIOS[name]['shock_u']:+.1f}pp",
+            "Inflation Shock": f"{NAMED_SCENARIOS[name]['shock_pi']:+.1f}pp",
+            "Forecast U": f"{res['forecast']['unemployment']:.2f}%",
+            "Forecast π": f"{res['forecast']['inflation']:.2f}%",
+            "PD": f"{res['predicted_pd']:.2%}",
+            "Rating": res["rating"],
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ── PD comparison bar ────────────────────────────────────────────────────
+    st.subheader("Probability of Default by Scenario")
+    fig_pd = go.Figure()
+    for i, (name, res) in enumerate(comparison.items()):
+        r = res["rating"]
+        fig_pd.add_trace(go.Bar(
+            x=[name],
+            y=[res["predicted_pd"] * 100],
+            marker_color=RATING_COLOR.get(r, palette[i % len(palette)]),
+            text=f"{res['predicted_pd']:.2%}<br>{r}",
+            textposition="outside",
+            name=name,
+        ))
+    fig_pd.update_layout(height=380, yaxis_title="PD (%)",
+                          showlegend=False, yaxis_ticksuffix="%")
+    st.plotly_chart(fig_pd, use_container_width=True)
+
+    # ── Shock path PD curves ─────────────────────────────────────────────────
+    st.subheader("PD Trajectory Over Shock Horizon")
+    credit = CreditModel()
+    fig_curves = go.Figure()
+
+    for i, (name, res) in enumerate(comparison.items()):
+        params = NAMED_SCENARIOS[name]
+        base_u = res["forecast"]["unemployment"]
+        base_pi = res["forecast"]["inflation"]
+        path = build_shock_path(base_u, base_pi,
+                                params["shock_u"], params["shock_pi"],
+                                horizon=8, decay=0.7)
+        path = compute_pd_path(path, credit)
+
+        fig_curves.add_trace(go.Scatter(
+            x=path["period"],
+            y=path["predicted_pd"] * 100,
+            mode="lines+markers",
+            name=name,
+            line=dict(color=palette[i % len(palette)], width=2.5),
+            hovertemplate=f"{name}<br>Quarter %{{x}}<br>PD: %{{y:.2f}}%<extra></extra>",
+        ))
+
+    fig_curves.update_layout(
+        height=380,
+        yaxis_title="PD (%)",
+        xaxis_title="Quarter",
+        yaxis_ticksuffix="%",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    st.plotly_chart(fig_curves, use_container_width=True)
+
+    # ── IRF comparison ───────────────────────────────────────────────────────
+    st.subheader("IRF Comparison: Unemployment Response to Unemployment Shock")
+    fig_irf_comp = go.Figure()
+
+    for i, (name, res) in enumerate(comparison.items()):
+        irfs = res.get("irf", {}).get("irfs", [])
+        if not irfs:
+            continue
+        vals = [float(irfs[h][0, 0]) for h in range(len(irfs))]
+        fig_irf_comp.add_trace(go.Scatter(
+            x=list(range(len(vals))),
+            y=vals,
+            mode="lines+markers",
+            name=name,
+            line=dict(color=palette[i % len(palette)], width=2),
+        ))
+
+    fig_irf_comp.add_hline(y=0, line_dash="dash", line_color="grey", opacity=0.5)
+    fig_irf_comp.update_layout(
+        height=350,
+        xaxis_title="Horizon (quarters)",
+        yaxis_title="Response",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    st.plotly_chart(fig_irf_comp, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: RUN HISTORY
+# ══════════════════════════════════════════════════════════════════════════════
+elif tab_selected == "🕘 Run History":
+    st.title("🕘 Run History & Replay")
+
+    history = st.session_state.run_history
+
+    if not history:
+        st.info("No runs yet this session. Run the pipeline to start logging.")
+        st.stop()
+
+    history_df = pd.DataFrame(history)
+    history_df["pd"] = history_df["pd"].map("{:.2%}".format)
+    history_df["u_forecast"] = history_df["u_forecast"].map("{:.2f}%".format)
+    history_df["pi_forecast"] = history_df["pi_forecast"].map("{:.2f}%".format)
+    history_df.columns = ["Run ID", "Model", "Lags", "PD", "Rating",
+                           "U Forecast", "π Forecast"]
+
+    st.subheader("Session Run Log")
+    st.dataframe(history_df, use_container_width=True, hide_index=True)
+
+    # Replay
+    st.markdown("---")
+    st.subheader("Replay a Run")
+    run_ids = [r["id"] for r in history]
+    selected_id = st.selectbox("Select Run ID", run_ids)
+
+    if st.button("🔁 Replay Selected Run"):
+        selected_run = next(r for r in history if r["id"] == selected_id)
+        with st.spinner("Replaying..."):
+            try:
+                replayed = run_pipeline(
+                    model_type=selected_run["model"],
+                    var_lags=selected_run["lags"],
+                    run_stress=True,
+                )
+                st.success(f"Replayed run {selected_id}")
+                fc = replayed["forecast"]
+                r1, r2, r3 = st.columns(3)
+                r1.metric("PD", f"{replayed['predicted_pd']:.2%}")
+                r2.metric("Rating", replayed["rating"])
+                r3.metric("Model", replayed["model_type"])
+            except Exception as e:
+                st.error(f"Replay error: {e}")
+
+    # Compare two runs
+    if len(history) >= 2:
+        st.markdown("---")
+        st.subheader("Compare Two Runs")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            run_a_id = st.selectbox("Run A", run_ids, key="run_a")
+        with col_b:
+            run_b_id = st.selectbox("Run B", run_ids,
+                                     index=min(1, len(run_ids) - 1), key="run_b")
+
+        if st.button("📊 Compare"):
+            run_a = next(r for r in history if r["id"] == run_a_id)
+            run_b = next(r for r in history if r["id"] == run_b_id)
+
+            comp_data = {
+                "Metric": ["Model", "Lags", "U Forecast", "π Forecast", "PD", "Rating"],
+                f"Run {run_a_id}": [
+                    run_a["model"], run_a["lags"],
+                    run_a["u_forecast"], run_a["pi_forecast"],
+                    run_a["pd"], run_a["rating"],
+                ],
+                f"Run {run_b_id}": [
+                    run_b["model"], run_b["lags"],
+                    run_b["u_forecast"], run_b["pi_forecast"],
+                    run_b["pd"], run_b["rating"],
+                ],
+            }
+            st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
+
+
+####################################################################################################
+# FILE: file_structure.py
+####################################################################################################
+
+# file_structure.py
+import os
+
+SKIP_DIRS = {"venv", "__pycache__", ".git"}
+SKIP_FILES = {".DS_Store"}
+
+def print_structure(path=".", indent=""):
+    for item in sorted(os.listdir(path)):
+        if item in SKIP_FILES:
+            continue
+
+        item_path = os.path.join(path, item)
+
+        if os.path.isdir(item_path):
+            if item in SKIP_DIRS:
+                continue
+            print(indent + item + "/")
+            print_structure(item_path, indent + "    ")
+        else:
+            print(indent + item)
+
+print_structure(".")
+
+
+####################################################################################################
+# FILE: main.py
+####################################################################################################
+
+"""
+main.py
+-------
+CLI entry point
+"""
+
+from services.pipeline_service import run_fresh_pipeline
+
+
+def print_section(title: str):
+    print("\n" + "=" * 60)
+    print(title.upper())
+    print("=" * 60)
+
+
+def main():
+    result = run_fresh_pipeline()
+
+    # -------------------------
+    # FORECAST
+    # -------------------------
+    print_section("Macro Forecast")
+
+    fc = result["forecast"]
+    ci = result["forecast_ci"]
+
+    print(f"Unemployment : {fc['unemployment']:.2f}%")
+    print(f"  CI         : [{ci['unemployment']['lower']:.2f}, {ci['unemployment']['upper']:.2f}]")
+
+    print(f"Inflation    : {fc['inflation']:.2f}%")
+    print(f"  CI         : [{ci['inflation']['lower']:.2f}, {ci['inflation']['upper']:.2f}]")
+
+    # -------------------------
+    # CREDIT
+    # -------------------------
+    print_section("Credit Risk")
+
+    print(f"PD      : {result['predicted_pd']:.4%}")
+    print(f"Rating  : {result['rating']}")
+
+    # -------------------------
+    # SENSITIVITY
+    # -------------------------
+    print_section("Sensitivity")
+
+    sens = result["sensitivity"]
+
+    print(f"+1pp U → ΔPD : {sens['unemployment_shock_delta']:+.4%}")
+    print(f"+1pp π → ΔPD : {sens['inflation_shock_delta']:+.4%}")
+
+    # -------------------------
+    # STRESS
+    # -------------------------
+    print_section("Stress Test")
+
+    print(result["stress_test"].to_string(index=False))
+
+    # -------------------------
+    # DIAGNOSTICS (SAFE)
+    # -------------------------
+    print_section("Diagnostics")
+
+    print(f"VAR Lags Used : {result.get('var_lags_used')}")
+    print(f"VAR Stable    : {result.get('var_stability')}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+####################################################################################################
+# FILE: models/__init__.py
+####################################################################################################
+
+# models/__init__.py
+from .var_model import VARModel
+from .svar_cholesky import SVARCholesky
+from .sign_restriction_svar import SVARSignRestrictions
+from .bvar import BVARModel
+from .local_projections import LocalProjections
+
+
+####################################################################################################
+# FILE: models/base_model.py
+####################################################################################################
+
+from abc import ABC, abstractmethod
+
+
+class BaseMacroModel(ABC):
+
+    @abstractmethod
+    def fit(self, data):
+        pass
+
+    @abstractmethod
+    def forecast(self, steps=1):
+        pass
+
+    @abstractmethod
+    def irf(self):
+        """
+        MUST return:
+        {
+            "irfs": np.ndarray,
+            "fevd": np.ndarray | None,
+            "type": str
+        }
+        """
+        pass
+
+
+####################################################################################################
+# FILE: models/bvar.py
+####################################################################################################
+
+"""
+models/bvar.py
+--------------
+Bayesian VAR with Minnesota Prior.
+
+The Minnesota prior (Litterman 1986) shrinks VAR coefficients toward
+a random walk for each variable, preventing overfitting in short macro
+samples. This is standard in central bank forecasting (NY Fed, ECB).
+
+The prior assumes:
+  - Own lags: shrink toward 1 for lag 1, 0 for higher lags
+  - Cross-variable lags: shrink toward 0
+  - Tighter = more shrinkage toward the prior (lambda controls this)
+
+Why this matters for the portfolio:
+  - Minnesota prior BVAR is the workhorse model at most central banks
+  - Mentioning it in an interview at a credit/risk firm signals you know
+    the forecasting literature, not just sklearn
+"""
+
+import numpy as np
+import pandas as pd
+from scipy import linalg
+from models.interfaces import IRFBundle
+
+
+class BVARModel:
+    """
+    Bayesian VAR with Minnesota prior via dummy observations.
+
+    Parameters
+    ----------
+    lags    : int   Number of lags
+    lambda_ : float Prior tightness (smaller = tighter/more shrinkage)
+    """
+
+    def __init__(self, lags: int = 2, lambda_: float = 0.2):
+        self.lags = lags
+        self.lambda_ = lambda_
+        self.fitted = None
+        self.coeffs = None
+        self.sigma = None
+        self.data = None
+
+    # ------------------------------------------------------------------
+    # Minnesota dummy observations (Banbura et al. 2010 approach)
+    # ------------------------------------------------------------------
+    def _build_minnesota_dummies(self, data: np.ndarray):
+        """
+        Construct dummy observation matrices encoding the Minnesota prior.
+        Returns (Y_d, X_d) dummy data appended to real data for OLS.
+        """
+        n = data.shape[1]  # number of variables
+        p = self.lags
+        lam = self.lambda_
+
+        # Residual variance estimate (AR(1) for each variable)
+        ar_sigmas = []
+        for i in range(n):
+            y = data[1:, i]
+            x = data[:-1, i].reshape(-1, 1)
+            b = np.linalg.lstsq(x, y, rcond=None)[0]
+            resid = y - x @ b
+            ar_sigmas.append(np.std(resid))
+        s = np.array(ar_sigmas)
+
+        # Dummy Y: (n*p + n) × n
+        # Dummy X: (n*p + n) × (n*p + 1)
+        rows_coeff = n * p
+        rows_sigma = n
+        total = rows_coeff + rows_sigma
+
+        Y_d = np.zeros((total, n))
+        X_d = np.zeros((total, n * p + 1))
+
+        # Coefficient dummies (shrink toward own-lag-1 = 1, others = 0)
+        for lag in range(1, p + 1):
+            for var in range(n):
+                row = (lag - 1) * n + var
+                Y_d[row, var] = s[var] / (lam * lag)
+                col = (lag - 1) * n + var + 1  # +1 for intercept
+                X_d[row, col] = s[var] / (lam * lag)
+
+        # Sigma dummies (prior on residual variance)
+        for var in range(n):
+            row = rows_coeff + var
+            Y_d[row, var] = s[var]
+            X_d[row, 0] = 0  # no intercept in sigma dummies
+
+        return Y_d, X_d
+
+    # ------------------------------------------------------------------
+    # Build OLS design matrices from data
+    # ------------------------------------------------------------------
+    def _build_ols_matrices(self, data: np.ndarray):
+        T, n = data.shape
+        p = self.lags
+
+        Y = data[p:, :]
+        X = np.ones((T - p, n * p + 1))  # intercept + lags
+
+        for lag in range(1, p + 1):
+            X[:, 1 + (lag - 1) * n: 1 + lag * n] = data[p - lag: T - lag, :]
+
+        return Y, X
+
+    # ------------------------------------------------------------------
+    # Fit
+    # ------------------------------------------------------------------
+    def fit(self, data: pd.DataFrame) -> "BVARModel":
+        self.data = data
+        arr = data.values.astype(float)
+
+        Y, X = self._build_ols_matrices(arr)
+        Y_d, X_d = self._build_minnesota_dummies(arr)
+
+        # Augment with dummies
+        Y_aug = np.vstack([Y, Y_d])
+        X_aug = np.vstack([X, X_d])
+
+        # Posterior OLS: B = (X'X)^{-1} X'Y
+        XtX = X_aug.T @ X_aug
+        XtY = X_aug.T @ Y_aug
+
+        self.coeffs = np.linalg.solve(XtX, XtY)  # shape: (n*p+1, n)
+
+        resid = Y_aug - X_aug @ self.coeffs
+        self.sigma = (resid.T @ resid) / (Y_aug.shape[0] - X_aug.shape[1])
+
+        self._last_obs = arr[-self.lags:]
+        self._n = arr.shape[1]
+        self._columns = list(data.columns)
+
+        return self
+
+    # ------------------------------------------------------------------
+    # Forecast
+    # ------------------------------------------------------------------
+    def forecast(self, steps: int = 1) -> np.ndarray:
+        if self.coeffs is None:
+            raise ValueError("Model must be fit before forecasting.")
+
+        n, p = self._n, self.lags
+        B = self.coeffs  # (n*p+1, n)
+
+        history = list(self._last_obs)
+        forecasts = []
+
+        for _ in range(steps):
+            x = np.ones(n * p + 1)
+            for lag in range(p):
+                x[1 + lag * n: 1 + (lag + 1) * n] = history[-(lag + 1)]
+            y_hat = x @ B
+            forecasts.append(y_hat)
+            history.append(y_hat)
+
+        return np.array(forecasts)  # (steps, n)
+
+    # ------------------------------------------------------------------
+    # IRF via Cholesky (reduced-form residuals)
+    # ------------------------------------------------------------------
+    def irf(self, horizon: int = 10) -> IRFBundle:
+        if self.coeffs is None:
+            raise ValueError("Must fit before computing IRF.")
+
+        n, p = self._n, self.lags
+        B = self.coeffs[1:, :].T  # (n, n*p) — drop intercept, transpose
+
+        # Companion matrix
+        k = n * p
+        companion = np.zeros((k, k))
+        companion[:n, :] = B
+        companion[n:, :-n] = np.eye(k - n)
+
+        # Cholesky structural identification
+        try:
+            P = np.linalg.cholesky(self.sigma)
+        except np.linalg.LinAlgError:
+            P = np.eye(n)
+
+        irfs = []
+        Ak = np.eye(k)
+        for _ in range(horizon):
+            response = Ak[:n, :n] @ P
+            irfs.append(response)
+            Ak = Ak @ companion
+
+        # FEVD
+        mse = np.zeros((n, n))
+        fevd = np.zeros((horizon, n, n))
+        for h in range(horizon):
+            shock_contrib = np.array([
+                irfs[h][:, j] ** 2 for j in range(n)
+            ]).T  # (n, n)
+            mse += shock_contrib
+            fevd[h] = mse / (mse.sum(axis=1, keepdims=True) + 1e-10)
+
+        return IRFBundle(
+            irfs=[irfs[i] for i in range(horizon)],
+            fevd=fevd,
+            model_type="bvar_minnesota"
+        )
+
+    def diagnostics(self) -> dict:
+        return {
+            "var_lags_used": self.lags,
+            "var_stability": None,  # TODO: check companion eigenvalues
+            "bvar_lambda": self.lambda_,
+        }
+
+
+####################################################################################################
+# FILE: models/credit_model.py
+####################################################################################################
+
+"""
+models/credit_model.py
+----------------------
+Macro-driven Probability of Default (PD) model.
+
+Maps macro variables → credit risk using a logistic function.
+Used for stress testing, rating assignment, and sensitivity analysis.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+
+from config.settings import settings
+
+
+@dataclass
+class StressScenario:
+    name: str
+    unemployment: float
+    inflation: float
+
+
+class CreditModel:
+    def __init__(
+        self,
+        beta_0=settings.BETA_0,
+        beta_u=settings.BETA_U,
+        beta_pi=settings.BETA_PI,
+    ):
+        self.beta_0 = beta_0
+        self.beta_u = beta_u
+        self.beta_pi = beta_pi
+
+    # -------------------------
+    # Core PD
+    # -------------------------
+    def _logit(self, u, pi):
+        return self.beta_0 + self.beta_u * u + self.beta_pi * pi
+
+    def predict_pd(self, u, pi):
+        z = self._logit(u, pi)
+        return float(1 / (1 + np.exp(-z)))
+
+    def predict_pd_batch(self, df):
+        z = (
+            self.beta_0
+            + self.beta_u * df["unemployment"]
+            + self.beta_pi * df["inflation"]
+        )
+        return 1 / (1 + np.exp(-z))
+
+    # -------------------------
+    # Calibration
+    # -------------------------
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(X)
+
+        model = LogisticRegression()
+        model.fit(Xs, y)
+
+        self.beta_u = model.coef_[0][0] / scaler.scale_[0]
+        self.beta_pi = model.coef_[0][1] / scaler.scale_[1]
+        self.beta_0 = model.intercept_[0]
+
+        return self
+
+    # -------------------------
+    # Rating
+    # -------------------------
+    def pd_to_rating(self, pd_val):
+        if pd_val < 0.002: return "AAA"
+        if pd_val < 0.005: return "AA"
+        if pd_val < 0.01: return "A"
+        if pd_val < 0.02: return "BBB"
+        if pd_val < 0.05: return "BB"
+        if pd_val < 0.1: return "B"
+        if pd_val < 0.2: return "CCC"
+        return "D"
+
+    # -------------------------
+    # Stress testing
+    # -------------------------
+    def stress_test(self, scenarios):
+        rows = []
+
+        for s in scenarios:
+            pd_val = self.predict_pd(s.unemployment, s.inflation)
+
+            rows.append({
+                "scenario": s.name,
+                "unemployment": s.unemployment,
+                "inflation": s.inflation,
+                "predicted_pd": pd_val,
+                "rating": self.pd_to_rating(pd_val),
+            })
+
+        return pd.DataFrame(rows)
+
+    # -------------------------
+    # Sensitivity (FIXED CONTRACT)
+    # -------------------------
+    def sensitivity(self, u=4.0, pi=2.5, shock=1.0):
+        base = self.predict_pd(u, pi)
+        up = self.predict_pd(u + shock, pi)
+        ip = self.predict_pd(u, pi + shock)
+
+        return {
+            "base_pd": base,
+            "unemployment_shock_delta": up - base,
+            "inflation_shock_delta": ip - base,
+        }
+
+
+####################################################################################################
+# FILE: models/experiment_store.py
+####################################################################################################
+
+import sqlite3
+import json
+from pathlib import Path
+from datetime import datetime
+
+from utils.serialization import to_json_safe
+
+DB_PATH = Path("runs/experiments.db")
+
+
+class ExperimentStore:
+
+    def __init__(self):
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        self._create_table()
+
+    def _create_table(self):
+        self.conn.execute("""
+        CREATE TABLE IF NOT EXISTS experiments (
+            experiment_id TEXT PRIMARY KEY,
+            timestamp TEXT,
+            model_version TEXT,
+            params TEXT,
+            metrics TEXT,
+            artifacts TEXT
+        )
+        """)
+        self.conn.commit()
+
+    def log_run(self, experiment_id, model_version, params, metrics, artifacts):
+
+        # 🔒 FORCE SAFE SERIALIZATION HERE
+        params = to_json_safe(params)
+        metrics = to_json_safe(metrics)
+        artifacts = to_json_safe(artifacts)
+
+        self.conn.execute("""
+        INSERT INTO experiments VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            experiment_id,
+            datetime.now().isoformat(),
+            model_version,
+            json.dumps(params),
+            json.dumps(metrics),
+            json.dumps(artifacts)
+        ))
+
+        self.conn.commit()
+
+    def list_runs(self):
+        cursor = self.conn.execute("""
+        SELECT experiment_id, timestamp, model_version
+        FROM experiments
+        ORDER BY timestamp DESC
+        """)
+        return cursor.fetchall()
+
+    def get_run(self, experiment_id):
+        cursor = self.conn.execute("""
+        SELECT * FROM experiments WHERE experiment_id=?
+        """, (experiment_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "experiment_id": row[0],
+            "timestamp": row[1],
+            "model_version": row[2],
+            "params": json.loads(row[3]),
+            "metrics": json.loads(row[4]),
+            "artifacts": json.loads(row[5]),
+        }
+
+
+store = ExperimentStore()
+
+
+####################################################################################################
+# FILE: models/interfaces.py
+####################################################################################################
+
+from dataclasses import dataclass
+from typing import List
+import numpy as np
+
+
+@dataclass
+class IRFBundle:
+    irfs: List[np.ndarray]     # list of (2x2)
+    fevd: np.ndarray           # (H, 2, 2)
+    model_type: str
+
+
+class BaseTimeSeriesModel:
+    """
+    HARD CONTRACT:
+    ALL MODELS MUST FOLLOW THIS EXACT INTERFACE
+    """
+
+    def fit(self, data):
+        raise NotImplementedError
+
+    def forecast(self, steps: int) -> np.ndarray:
+        raise NotImplementedError
+
+    def irf(self, horizon: int = 10) -> IRFBundle:
+        raise NotImplementedError
+
+
+####################################################################################################
+# FILE: models/local_projections.py
+####################################################################################################
+
+"""
+models/local_projections.py
+---------------------------
+Local Projections (Jordà 2005) for Impulse Response Functions.
+
+Unlike VAR-based IRFs which compound model errors across horizons,
+Local Projections estimate each horizon h directly by regressing
+y_{t+h} on current shocks. This is:
+
+  - More robust to misspecification
+  - Easier to add controls
+  - The preferred method in modern empirical macro (Ramey 2016)
+  - Used by the Fed and ECB for robustness checks alongside VARs
+
+Each horizon h is a separate OLS regression:
+  y_{i,t+h} = α_h + Σ_l β_l * X_{t-l} + ε_{t+h}
+
+The IRF at horizon h is the coefficient on the shock variable.
+
+Why include this:
+  - Shows you know the IRF literature beyond just VAR
+  - Provides a robustness check for your VAR IRFs
+  - LP-IRFs are asymptotically equivalent to VAR IRFs under correct spec
+"""
+
+import numpy as np
+import pandas as pd
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tools import add_constant
+from models.interfaces import IRFBundle
+
+
+class LocalProjections:
+    """
+    LP-IRF: horizon-by-horizon OLS estimation of impulse responses.
+
+    Parameters
+    ----------
+    horizon : int   Maximum IRF horizon
+    lags    : int   Number of control lags included in each regression
+    """
+
+    def __init__(self, horizon: int = 12, lags: int = 2):
+        self.horizon = horizon
+        self.lags = lags
+        self.data = None
+        self.irfs_ = None
+        self.se_ = None
+        self._columns = None
+        self._last_obs = None
+
+    # ------------------------------------------------------------------
+    def fit(self, data: pd.DataFrame) -> "LocalProjections":
+        """
+        Estimate LP-IRFs for all variables responding to all shocks.
+
+        Shock identification: Cholesky ordering (same as reduced-form VAR).
+        The shock to variable j at time t is the j-th Cholesky residual.
+        """
+        self.data = data
+        arr = data.values.astype(float)
+        self._columns = list(data.columns)
+        T, n = arr.shape
+        p = self.lags
+
+        # Step 1: Get reduced-form residuals from a VAR(p)
+        Y = arr[p:, :]
+        X_list = [arr[p - l: T - l, :] for l in range(1, p + 1)]
+        X = np.hstack([np.ones((T - p, 1))] + X_list)
+
+        B_ols = np.linalg.lstsq(X, Y, rcond=None)[0]
+        resid = Y - X @ B_ols  # (T-p, n)
+
+        # Step 2: Cholesky on residual covariance
+        denom = max(T - p - n * p - 1, 1)
+        Sigma = (resid.T @ resid) / denom
+        try:
+            P = np.linalg.cholesky(Sigma)
+        except np.linalg.LinAlgError:
+            P = np.eye(n)
+
+        # Orthogonalized shocks
+        shocks = resid @ np.linalg.inv(P).T  # (T-p, n)
+
+        # Step 3: LP regression for each horizon h and each variable i
+        irfs = np.zeros((self.horizon, n, n))
+        se = np.zeros((self.horizon, n, n))
+
+        for h in range(self.horizon):
+            for i in range(n):
+                # Assign y_h and shocks_h based on horizon
+                if h == 0:
+                    y_h = arr[p:, i]
+                    shocks_h = shocks
+                else:
+                    if p + h > T:
+                        break
+                    y_h = arr[p + h: T, i]
+                    shocks_h = shocks[: len(y_h), :]
+
+                # Skip if not enough observations
+                if len(y_h) < n + 5:
+                    continue
+
+                X_lp = add_constant(shocks_h)
+
+                try:
+                    res = OLS(y_h[: len(X_lp)], X_lp).fit(
+                        cov_type="HAC", cov_kwds={"maxlags": h + 1}
+                    )
+                    # Coefficients 1..n are shock responses (skip intercept)
+                    irfs[h, i, :] = res.params[1: n + 1]
+                    se[h, i, :] = res.bse[1: n + 1]
+                except Exception:
+                    pass
+
+        self.irfs_ = irfs
+        self.se_ = se
+        self._last_obs = arr[-self.lags:]
+
+        return self
+
+    # ------------------------------------------------------------------
+    def irf(self, horizon: int = None) -> IRFBundle:
+        if self.irfs_ is None:
+            raise ValueError("Must call fit() first.")
+
+        h = horizon or self.horizon
+        irfs_list = [self.irfs_[i] for i in range(min(h, len(self.irfs_)))]
+
+        return IRFBundle(
+            irfs=irfs_list,
+            fevd=None,  # LP doesn't naturally produce FEVD
+            model_type="local_projections"
+        )
+
+    # ------------------------------------------------------------------
+    def forecast(self, steps: int = 1) -> np.ndarray:
+        """
+        LP doesn't naturally forecast — uses naive last-observation carry.
+        Included so LP satisfies the same interface as VAR/BVAR.
+        """
+        if self.data is None:
+            raise ValueError("Must call fit() first.")
+        arr = self.data.values.astype(float)
+        last = arr[-1:, :]
+        return np.tile(last, (steps, 1))
+
+    # ------------------------------------------------------------------
+    def diagnostics(self) -> dict:
+        return {
+            "var_lags_used": self.lags,
+            "var_stability": None,
+            "lp_horizon": self.horizon,
+        }
+
+    # ------------------------------------------------------------------
+    def get_ci(self, alpha: float = 0.10):
+        """
+        Confidence bands via normal approximation: IRF ± z * SE.
+
+        Returns
+        -------
+        lower, upper : np.ndarray, both shape (horizon, n, n)
+        """
+        if self.irfs_ is None:
+            raise ValueError("Must call fit() first.")
+
+        from scipy.stats import norm
+        z = norm.ppf(1 - alpha / 2)
+        lower = self.irfs_ - z * self.se_
+        upper = self.irfs_ + z * self.se_
+        return lower, upper
+
+
+####################################################################################################
+# FILE: models/model_adapter.py
+####################################################################################################
+
+import numpy as np
+
+
+class ModelAdapter:
+    """
+    Unifies ALL models into:
+    - forecast
+    - forecast_ci
+    - irf
+    - fevd
+    """
+
+    def __init__(self, model, model_type: str, alpha: float = 0.1):
+        self.model = model
+        self.model_type = model_type
+        self.alpha = alpha
+
+    def forecast(self):
+        fc = self.model.forecast(steps=1)[0]
+
+        u = float(fc[0])
+        pi = float(fc[1])
+
+        # simple but stable CI
+        spread = 0.4
+
+        return {
+            "forecast": {
+                "unemployment": u,
+                "inflation": pi
+            },
+            "forecast_ci": {
+                "unemployment": {"lower": u - spread, "upper": u + spread},
+                "inflation": {"lower": pi - spread, "upper": pi + spread}
+            }
+        }
+
+    def irf(self):
+        irf_obj = self.model.irf()
+
+        return {
+            "irfs": irf_obj.irfs,
+            "fevd": irf_obj.fevd,
+            "model_type": self.model_type
+        }
+
+    def diagnostics(self):
+        if hasattr(self.model, "diagnostics"):
+            return self.model.diagnostics()
+        return {
+            "var_lags_used": None,
+            "var_stability": None
+        }
+
+
+####################################################################################################
+# FILE: models/model_output.py
+####################################################################################################
+
+class ModelOutput:
+    def __init__(self, irfs, fevd=None, forecast=None, meta=None):
+        self.irfs = irfs
+        self.fevd = fevd
+        self.forecast = forecast
+        self.meta = meta or {}
+
+
+####################################################################################################
+# FILE: models/model_registry.py
+####################################################################################################
+
+import pickle
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from models.var_model import VARModel
+
+ARTIFACT_DIR = Path("models/artifacts")
+REGISTRY_FILE = ARTIFACT_DIR / "registry.pkl"
+
+
+@dataclass
+class ModelBundle:
+    version: str
+    experiment_id: str
+    timestamp: str
+
+    var_model: VARModel
+    irf: object
+    fevd: object
+
+
+class ModelRegistry:
+
+    def __init__(self):
+        self.registry = self._load_registry()
+
+    def _load_registry(self):
+        if REGISTRY_FILE.exists():
+            with open(REGISTRY_FILE, "rb") as f:
+                return pickle.load(f)
+        return {}
+
+    def _save_registry(self):
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        with open(REGISTRY_FILE, "wb") as f:
+            pickle.dump(self.registry, f)
+
+    def create_and_train(self, data, version: str = None):
+
+        experiment_id = str(uuid.uuid4())[:8]
+        version = version or f"v{len(self.registry) + 1}"
+        timestamp = datetime.now().isoformat()
+
+        model = VARModel()
+        model.fit(data)
+
+        irf_bundle = model.irf(10)
+
+        bundle = ModelBundle(
+            version=version,
+            experiment_id=experiment_id,
+            timestamp=timestamp,
+            var_model=model,
+            irf=irf_bundle.irfs,
+            fevd=irf_bundle.fevd,
+        )
+
+        self.registry[experiment_id] = bundle
+        self._save_registry()
+
+        return bundle
+
+    def load_latest(self):
+        if not self.registry:
+            raise ValueError("Registry empty — run training mode first")
+
+        latest_id = sorted(self.registry.keys())[-1]
+        return self.registry[latest_id]
+
+    def get(self, experiment_id: str):
+        return self.registry[experiment_id]
+
+    def list_runs(self):
+        return [
+            {
+                "experiment_id": k,
+                "version": v.version,
+                "timestamp": v.timestamp,
+            }
+            for k, v in self.registry.items()
+        ]
+
+
+registry = ModelRegistry()
+
+
+####################################################################################################
+# FILE: models/sign_restriction_svar.py
+####################################################################################################
+
+import numpy as np
+from statsmodels.tsa.api import VAR
+from numpy.linalg import qr
+
+
+class SVARSignRestrictions:
+
+    def __init__(self, lags=2, horizon=10, n_draws=200):
+        self.lags = lags
+        self.horizon = horizon
+        self.n_draws = n_draws
+
+        self.results = None
+        self.accepted = []
+
+    def fit(self, data):
+        self.results = VAR(data).fit(self.lags)
+        self._estimate()
+        return self
+
+    def _rand_q(self, k):
+        q, _ = qr(np.random.normal(size=(k, k)))
+        return q
+
+    def _estimate(self):
+
+        base = self.results.irf(self.horizon).irfs
+        k = self.results.neqs
+
+        accepted = []
+
+        for _ in range(self.n_draws):
+
+            Q = self._rand_q(k)
+
+            # structural transform
+            candidate = np.einsum("hij,jk->hik", base, Q)
+
+            # ----------------------------
+            # STRONGER SIGN RESTRICTIONS
+            # ----------------------------
+            u_shock = candidate[:, 0, 0]   # unemployment response to u-shock
+            pi_shock = candidate[:, 1, 0]  # inflation response to u-shock
+
+            # enforce across multiple horizons (CRITICAL FIX)
+            if (
+                np.all(u_shock[:3] > 0) and
+                np.all(pi_shock[:3] < 0)
+            ):
+                accepted.append(candidate)
+
+        if len(accepted) == 0:
+            accepted = [base]
+
+        self.accepted = accepted
+
+    def forecast(self, steps=1):
+        return self.results.forecast(
+            self.results.endog[-self.lags:], steps
+        )
+
+    def irf(self):
+        from models.interfaces import IRFBundle
+
+        avg = np.mean(np.array(self.accepted), axis=0)
+        fevd = self.results.fevd(self.horizon).decomp
+        irfs = [avg[i] for i in range(avg.shape[0])]
+
+        return IRFBundle(
+            irfs=irfs,
+            fevd=fevd,
+            model_type="svar_sign"
+        )
+
+    def diagnostics(self):
+        return {
+            "var_lags_used": self.lags,
+            "var_stability": None,
+        }
+
+
+####################################################################################################
+# FILE: models/svar_cholesky.py
+####################################################################################################
+
+import numpy as np
+from statsmodels.tsa.api import VAR
+from models.interfaces import IRFBundle
+
+
+class SVARCholesky:
+
+    def __init__(self, lags=2):
+        self.lags = lags
+        self.results = None
+
+    def fit(self, data):
+        self.results = VAR(data).fit(self.lags)
+        return self
+
+    def forecast(self, steps=1):
+        return self.results.forecast(
+            self.results.endog[-self.lags:], steps
+        )
+
+    def irf(self, periods=10):
+
+        # FIX: no orth argument exists
+        irf = self.results.irf(periods)
+
+        fevd = self.results.fevd(periods).decomp
+
+        irfs = [irf.irfs[i] for i in range(irf.irfs.shape[0])]
+
+        return IRFBundle(
+            irfs=irfs,
+            fevd=fevd,
+            model_type="svar_cholesky"
+        )
+    
+    def diagnostics(self):
+        return {
+            "var_lags_used": self.lags,
+            "var_stability": None,
+        }
+
+
+####################################################################################################
+# FILE: models/var_model.py
+####################################################################################################
+
+import numpy as np
+from statsmodels.tsa.api import VAR
+from models.interfaces import IRFBundle
+
+
+class VARModel:
+
+    def __init__(self, lags=2, max_lags=8):
+        self.lags = lags
+        self.max_lags = max_lags
+        self.fitted = None
+
+    def fit(self, data):
+        model = VAR(data)
+
+        if self.lags is None:
+            self.lags = model.select_order(self.max_lags).aic
+
+        self.fitted = model.fit(self.lags)
+        return self
+
+    def forecast(self, steps=1):
+        return self.fitted.forecast(
+            self.fitted.endog[-self.lags:], steps
+        )
+
+    def irf(self, horizon=10):
+        irf_obj = self.fitted.irf(horizon)
+        fevd_obj = self.fitted.fevd(horizon)
+
+        irfs = [
+            irf_obj.irfs[i]
+            for i in range(irf_obj.irfs.shape[0])
+        ]
+
+        return IRFBundle(
+            irfs=irfs,
+            fevd=fevd_obj.decomp,
+            model_type="var"
+        )
+
+    def diagnostics(self):
+        return {
+            "var_lags_used": self.lags,
+            "var_stability": bool(self.fitted.is_stable())
+        }
+
+
+####################################################################################################
+# FILE: pipeline/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: pipeline/run_pipeline.py
+####################################################################################################
+
+"""
+pipeline/run_pipeline.py
+------------------------
+Core pipeline: data → model → forecast → credit risk → stress test.
+
+Supports:
+  - VAR, SVAR (Cholesky, Sign), BVAR, Local Projections
+  - IRF + FEVD for all model types
+  - Shock path engine (time series stress trajectories)
+  - Scenario comparison (run multiple worlds)
+  - Stationarity diagnostics
+  - Experiment logging
+"""
+
+import uuid
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.stattools import adfuller
+
+from config.settings import settings
+from models.credit_model import CreditModel, StressScenario
+from models.model_adapter import ModelAdapter
+from models.var_model import VARModel
+from models.svar_cholesky import SVARCholesky
+from models.sign_restriction_svar import SVARSignRestrictions
+from models.bvar import BVARModel
+from models.local_projections import LocalProjections
+
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+
+def load_data(path: str = settings.DATA_PATH) -> pd.DataFrame:
+    df = pd.read_csv(path, parse_dates=["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    df = df[["unemployment", "inflation"]].dropna().astype(float)
+    return df
+
+
+def check_stationarity(data: pd.DataFrame, sig: float = 0.05) -> dict:
+    results = {}
+    for col in data.columns:
+        stat, p, *_ = adfuller(data[col].dropna())
+        results[col] = {
+            "adf_stat": round(float(stat), 4),
+            "p_value": round(float(p), 4),
+            "stationary": bool(p < sig),
+        }
+    return results
+
+
+# ── Model factory ─────────────────────────────────────────────────────────────
+
+def build_model(model_type: str, var_lags: int, data: pd.DataFrame):
+    if model_type == "var":
+        return VARModel(lags=var_lags).fit(data)
+    elif model_type == "svar_cholesky":
+        return SVARCholesky(lags=var_lags).fit(data)
+    elif model_type == "svar_sign":
+        return SVARSignRestrictions(lags=var_lags).fit(data)
+    elif model_type == "bvar":
+        return BVARModel(lags=var_lags, lambda_=settings.BVAR_LAMBDA).fit(data)
+    elif model_type == "local_projections":
+        return LocalProjections(
+            horizon=settings.LP_HORIZON, lags=var_lags
+        ).fit(data)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+
+def normalize_forecast(fc: np.ndarray) -> tuple[float, float]:
+    fc = np.asarray(fc)
+    if fc.ndim == 1:
+        u, pi = fc[0], fc[1]
+    else:
+        u, pi = fc[0, 0], fc[0, 1]
+    return float(np.clip(u, -10, 30)), float(np.clip(pi, -10, 30))
+
+
+# ── Shock path engine ─────────────────────────────────────────────────────────
+
+def build_shock_path(
+    base_u: float,
+    base_pi: float,
+    shock_u: float = 0.0,
+    shock_pi: float = 0.0,
+    horizon: int = 8,
+    decay: float = 0.7,
+) -> pd.DataFrame:
+    """
+    Build a time-series shock trajectory with exponential decay.
+
+    Returns a DataFrame of shape (horizon, 3):
+        [period, unemployment, inflation]
+
+    decay: fraction of shock remaining each period (0.7 = 30% dissipates/period)
+    """
+    periods = []
+    for h in range(horizon):
+        factor = decay ** h
+        periods.append({
+            "period": h,
+            "unemployment": base_u + shock_u * factor,
+            "inflation": base_pi + shock_pi * factor,
+        })
+    return pd.DataFrame(periods)
+
+
+def compute_pd_path(shock_path: pd.DataFrame, credit_model: CreditModel) -> pd.DataFrame:
+    """Apply credit model along a shock path to get PD over time."""
+    path = shock_path.copy()
+    path["predicted_pd"] = credit_model.predict_pd_batch(path)
+    path["rating"] = path["predicted_pd"].apply(credit_model.pd_to_rating)
+    return path
+
+
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+
+def run_pipeline(
+    data_path: str = settings.DATA_PATH,
+    run_stress: bool = True,
+    var_lags: int = 2,
+    alpha: float = 0.10,
+    shock: float = 1.0,
+    model_type: str = "var",
+    shock_u: float = 0.0,
+    shock_pi: float = 0.0,
+    shock_horizon: int = 8,
+    shock_decay: float = 0.7,
+) -> dict:
+    """
+    Full pipeline execution.
+
+    Returns dict with keys:
+        experiment_id, model_type, forecast, forecast_ci,
+        irf, predicted_pd, rating, sensitivity, stress_test,
+        stationarity, var_lags_used, var_stability,
+        shock_path (if shocks specified)
+    """
+    df = load_data(data_path)
+    stationarity = check_stationarity(df)
+
+    model = build_model(model_type, var_lags, df)
+    adapter = ModelAdapter(model, model_type, alpha)
+
+    forecast_block = adapter.forecast()
+    irf_block = adapter.irf()
+    diagnostics = adapter.diagnostics()
+
+    raw_fc = model.forecast(steps=1)
+    u_hat, pi_hat = normalize_forecast(raw_fc)
+
+    forecast_block["forecast"]["unemployment"] = u_hat
+    forecast_block["forecast"]["inflation"] = pi_hat
+
+    credit = CreditModel()
+    pd_hat = credit.predict_pd(u_hat, pi_hat)
+    rating = credit.pd_to_rating(pd_hat)
+    sensitivity = credit.sensitivity(u=u_hat, pi=pi_hat, shock=shock)
+
+    stress_df = None
+    if run_stress:
+        scenarios = [
+            StressScenario("Baseline", 4.0, 2.5),
+            StressScenario("Adverse", 7.0, 4.0),
+            StressScenario("Severe", 12.0, 1.5),
+            StressScenario("Stagflation", 8.0, 9.0),
+            StressScenario("COVID", 15.0, 0.5),
+        ]
+        stress_df = credit.stress_test(scenarios)
+
+    # Shock path
+    shock_path_df = None
+    if shock_u != 0.0 or shock_pi != 0.0:
+        shock_path_df = build_shock_path(
+            u_hat, pi_hat, shock_u, shock_pi, shock_horizon, shock_decay
+        )
+        shock_path_df = compute_pd_path(shock_path_df, credit)
+
+    # IRF guard
+    irfs = irf_block.get("irfs", [])
+    if not irfs:
+        irf_block["irfs"] = []
+        irf_block["fevd"] = None
+
+    return {
+        "experiment_id": str(uuid.uuid4())[:8],
+        "model_type": model_type,
+        "forecast": forecast_block["forecast"],
+        "forecast_ci": forecast_block["forecast_ci"],
+        "irf": irf_block,
+        "predicted_pd": float(pd_hat),
+        "rating": rating,
+        "sensitivity": sensitivity,
+        "stress_test": stress_df,
+        "stationarity": stationarity,
+        "shock_path": shock_path_df,
+        **diagnostics,
+    }
+
+
+# ── Scenario comparison ───────────────────────────────────────────────────────
+
+NAMED_SCENARIOS = {
+    "Baseline":        {"shock_u": 0.0,  "shock_pi": 0.0},
+    "Adverse":         {"shock_u": 3.0,  "shock_pi": 1.5},
+    "Severely Adverse":{"shock_u": 8.0,  "shock_pi": -1.0},
+    "Stagflation":     {"shock_u": 4.0,  "shock_pi": 6.5},
+    "COVID Shock":     {"shock_u": 11.0, "shock_pi": -2.0},
+}
+
+
+def run_scenario_comparison(
+    scenarios: list[str],
+    model_type: str = "var",
+    var_lags: int = 2,
+    shock_horizon: int = 8,
+    shock_decay: float = 0.7,
+    data_path: str = settings.DATA_PATH,
+) -> dict:
+    """
+    Run pipeline for multiple named scenarios and return side-by-side results.
+
+    Returns dict keyed by scenario name, each value is a full pipeline result.
+    """
+    results = {}
+    for name in scenarios:
+        if name not in NAMED_SCENARIOS:
+            continue
+        params = NAMED_SCENARIOS[name]
+        result = run_pipeline(
+            data_path=data_path,
+            model_type=model_type,
+            var_lags=var_lags,
+            shock_horizon=shock_horizon,
+            shock_decay=shock_decay,
+            run_stress=False,
+            **params,
+        )
+        result["scenario_name"] = name
+        results[name] = result
+
+    return results
+
+
+####################################################################################################
+# FILE: services/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: services/pipeline_service.py
+####################################################################################################
+
+"""
+services/pipeline_service.py
+----------------------------
+Single entry point for all pipeline execution.
+Handles caching, scenario comparison, and run logging.
+"""
+
+from pipeline.run_pipeline import run_pipeline, run_scenario_comparison
+from utils.run_metadata import save_run_metadata
+
+_cached_result = None
+
+
+def get_pipeline_result(force_refresh: bool = False):
+    global _cached_result
+    if _cached_result is None or force_refresh:
+        _cached_result = run_pipeline()
+        try:
+            save_run_metadata(_cached_result)
+        except Exception:
+            pass
+    return _cached_result
+
+
+def run_fresh_pipeline(**kwargs):
+    result = run_pipeline(**kwargs)
+    try:
+        save_run_metadata(result)
+    except Exception:
+        pass
+    return result
+
+
+def run_comparison(scenarios: list, model_type: str = "var", var_lags: int = 2):
+    return run_scenario_comparison(
+        scenarios=scenarios,
+        model_type=model_type,
+        var_lags=var_lags,
+    )
+
+
+####################################################################################################
+# FILE: setup_env.py
+####################################################################################################
+
+"""
+setup_env.py
+------------
+Creates a virtual environment, installs dependencies, and runs the pipeline.
+Safe to run every time — skips setup steps that are already done.
+
+Usage:
+    python setup_env.py
+"""
+import os
+import subprocess
+import sys
+import venv
+from pathlib import Path
+
+VENV_NAME = "venv"
+REQUIREMENTS = "requirements.txt"
+MIN_PYTHON = (3, 10)
+
+
+def check_python_version():
+    if sys.version_info < MIN_PYTHON:
+        print(f"Error: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required.")
+        print(f"  Current version: {sys.version}")
+        sys.exit(1)
+    print(f"Python {sys.version.split()[0]} — OK")
+
+
+def run_command(command: str):
+    try:
+        subprocess.check_call(command, shell=True)
+    except subprocess.CalledProcessError:
+        print(f"\nError running: {command}")
+        sys.exit(1)
+
+
+def get_pip_path() -> str:
+    if os.name == "nt":
+        return str(Path(VENV_NAME) / "Scripts" / "pip.exe")
+    return str(Path(VENV_NAME) / "bin" / "pip")
+
+
+def get_python_path() -> str:
+    if os.name == "nt":
+        return str(Path(VENV_NAME) / "Scripts" / "python.exe")
+    return str(Path(VENV_NAME) / "bin" / "python")
+
+
+def is_venv_ready() -> bool:
+    """Check if the venv exists and all requirements are installed."""
+    python = get_python_path()
+    if not Path(python).exists():
+        return False
+
+    # Check every package in requirements.txt is importable
+    if not Path(REQUIREMENTS).exists():
+        return False
+
+    # Use pip to verify installed packages match requirements
+    pip = get_pip_path()
+    result = subprocess.run(
+        f'"{pip}" check',
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+    # Also verify the key packages are actually present
+    check = subprocess.run(
+        f'"{python}" -c "import pandas, numpy, statsmodels, fastapi, uvicorn"',
+        shell=True,
+        capture_output=True,
+    )
+    return check.returncode == 0
+
+
+def create_venv():
+    if Path(VENV_NAME).exists():
+        print(f"Virtual environment '{VENV_NAME}' already exists — skipping creation.")
+    else:
+        print(f"Creating virtual environment '{VENV_NAME}'...")
+        venv.create(VENV_NAME, with_pip=True)
+        print("  Done.")
+
+
+def install_requirements():
+    pip = get_pip_path()
+
+    if not Path(REQUIREMENTS).exists():
+        print(f"Error: {REQUIREMENTS} not found.")
+        sys.exit(1)
+
+    print("Upgrading pip...")
+    run_command(f'"{pip}" install --upgrade pip')
+
+    print(f"Installing packages from {REQUIREMENTS}...")
+    run_command(f'"{pip}" install -r {REQUIREMENTS}')
+    print("  All packages installed.")
+
+
+def run_pipeline():
+    python = get_python_path()
+    print("\n" + "=" * 50)
+    print("Running pipeline...")
+    print("=" * 50 + "\n")
+    run_command(f'"{python}" main.py')
+
+
+def main():
+    check_python_version()
+
+    if is_venv_ready():
+        print("Environment already set up — skipping install.")
+    else:
+        create_venv()
+        install_requirements()
+
+    run_pipeline()
+
+
+if __name__ == "__main__":
+    main()
+
+
+####################################################################################################
+# FILE: tests/test_suite.py
+####################################################################################################
+
+"""
+tests/test_suite.py
+-------------------
+Full test suite covering all models, pipeline, and API.
+Run: pytest tests/ -v
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def sample_macro_df():
+    np.random.seed(42)
+    n = 40
+    u = np.clip(5.0 + np.cumsum(np.random.normal(0, 0.3, n)), 2, 20)
+    pi = np.clip(2.5 + np.cumsum(np.random.normal(0, 0.2, n)), -2, 15)
+    return pd.DataFrame({"unemployment": u, "inflation": pi})
+
+
+# ── Credit Model ──────────────────────────────────────────────────────────────
+
+class TestCreditModel:
+
+    def setup_method(self):
+        from models.credit_model import CreditModel
+        self.model = CreditModel()
+
+    def test_pd_is_probability(self):
+        pd_val = self.model.predict_pd(5.0, 2.5)
+        assert 0 < pd_val < 1
+
+    def test_higher_unemployment_raises_pd(self):
+        assert self.model.predict_pd(10.0, 2.5) > self.model.predict_pd(3.0, 2.5)
+
+    def test_batch_prediction(self):
+        df = pd.DataFrame({"unemployment": [4.0, 8.0, 12.0],
+                            "inflation": [2.0, 4.0, 6.0]})
+        pds = self.model.predict_pd_batch(df)
+        assert len(pds) == 3
+        assert all(0 < p < 1 for p in pds)
+
+    def test_rating_valid(self):
+        valid = {"AAA", "AA", "A", "BBB", "BB", "B", "CCC", "D"}
+        assert self.model.pd_to_rating(0.01) in valid
+
+    def test_stress_test_returns_dataframe(self):
+        from models.credit_model import StressScenario
+        scenarios = [StressScenario("Test", 5.0, 2.5)]
+        df = self.model.stress_test(scenarios)
+        assert isinstance(df, pd.DataFrame)
+        assert "predicted_pd" in df.columns
+
+    def test_sensitivity_keys(self):
+        sens = self.model.sensitivity()
+        assert "base_pd" in sens
+        assert "unemployment_shock_delta" in sens
+        assert "inflation_shock_delta" in sens
+
+    def test_unemployment_shock_positive(self):
+        sens = self.model.sensitivity()
+        assert sens["unemployment_shock_delta"] > 0
+
+
+# ── VAR Model ─────────────────────────────────────────────────────────────────
+
+class TestVARModel:
+
+    def test_fit_forecast(self, sample_macro_df):
+        from models.var_model import VARModel
+        model = VARModel(lags=1).fit(sample_macro_df)
+        fc = model.forecast(steps=1)
+        assert fc.shape == (1, 2)
+
+    def test_irf_bundle(self, sample_macro_df):
+        from models.var_model import VARModel
+        model = VARModel(lags=1).fit(sample_macro_df)
+        bundle = model.irf(horizon=5)
+        assert len(bundle.irfs) == 6
+        assert bundle.fevd is not None
+
+    def test_diagnostics(self, sample_macro_df):
+        from models.var_model import VARModel
+        model = VARModel(lags=1).fit(sample_macro_df)
+        diag = model.diagnostics()
+        assert "var_lags_used" in diag
+        assert "var_stability" in diag
+
+
+# ── SVAR Cholesky ─────────────────────────────────────────────────────────────
+
+class TestSVARCholesky:
+
+    def test_fit_forecast(self, sample_macro_df):
+        from models.svar_cholesky import SVARCholesky
+        model = SVARCholesky(lags=1).fit(sample_macro_df)
+        fc = model.forecast(steps=1)
+        assert fc.shape == (1, 2)
+
+    def test_irf_bundle(self, sample_macro_df):
+        from models.svar_cholesky import SVARCholesky
+        model = SVARCholesky(lags=1).fit(sample_macro_df)
+        bundle = model.irf(periods=4)
+        assert len(bundle.irfs) == 5
+
+
+# ── BVAR ─────────────────────────────────────────────────────────────────────
+
+class TestBVAR:
+
+    def test_fit_forecast(self, sample_macro_df):
+        from models.bvar import BVARModel
+        model = BVARModel(lags=1, lambda_=0.2).fit(sample_macro_df)
+        fc = model.forecast(steps=1)
+        assert fc.shape == (1, 2)
+
+    def test_irf_bundle(self, sample_macro_df):
+        from models.bvar import BVARModel
+        model = BVARModel(lags=1).fit(sample_macro_df)
+        bundle = model.irf(horizon=6)
+        assert len(bundle.irfs) == 6
+        assert bundle.fevd is not None
+
+    def test_forecast_finite(self, sample_macro_df):
+        from models.bvar import BVARModel
+        model = BVARModel(lags=1).fit(sample_macro_df)
+        fc = model.forecast(steps=4)
+        assert np.all(np.isfinite(fc))
+
+
+# ── Local Projections ─────────────────────────────────────────────────────────
+
+class TestLocalProjections:
+
+    def test_fit_irf(self, sample_macro_df):
+        from models.local_projections import LocalProjections
+        model = LocalProjections(horizon=6, lags=1).fit(sample_macro_df)
+        bundle = model.irf()
+        assert len(bundle.irfs) <= 6
+
+    def test_forecast_shape(self, sample_macro_df):
+        from models.local_projections import LocalProjections
+        model = LocalProjections(horizon=4, lags=1).fit(sample_macro_df)
+        fc = model.forecast(steps=1)
+        assert fc.shape == (1, 2)
+
+
+# ── Pipeline ─────────────────────────────────────────────────────────────────
+
+class TestPipeline:
+
+    def test_pipeline_keys(self):
+        from pipeline.run_pipeline import run_pipeline
+        result = run_pipeline(run_stress=False, var_lags=1)
+        required = {"forecast", "forecast_ci", "predicted_pd", "rating",
+                    "sensitivity", "stationarity", "var_lags_used", "irf"}
+        assert required.issubset(result.keys())
+
+    def test_pipeline_pd_valid(self):
+        from pipeline.run_pipeline import run_pipeline
+        result = run_pipeline(run_stress=False, var_lags=1)
+        assert 0 < result["predicted_pd"] < 1
+
+    def test_pipeline_rating_valid(self):
+        from pipeline.run_pipeline import run_pipeline
+        valid = {"AAA", "AA", "A", "BBB", "BB", "B", "CCC", "D"}
+        result = run_pipeline(run_stress=False, var_lags=1)
+        assert result["rating"] in valid
+
+    def test_pipeline_stationarity(self):
+        from pipeline.run_pipeline import run_pipeline
+        result = run_pipeline(run_stress=False, var_lags=1)
+        assert "unemployment" in result["stationarity"]
+        assert "inflation" in result["stationarity"]
+
+    def test_pipeline_stress(self):
+        from pipeline.run_pipeline import run_pipeline
+        result = run_pipeline(run_stress=True, var_lags=1)
+        assert result["stress_test"] is not None
+        assert len(result["stress_test"]) > 0
+
+    def test_pipeline_bvar(self):
+        from pipeline.run_pipeline import run_pipeline
+        result = run_pipeline(model_type="bvar", run_stress=False, var_lags=1)
+        assert 0 < result["predicted_pd"] < 1
+
+    def test_pipeline_lp(self):
+        from pipeline.run_pipeline import run_pipeline
+        result = run_pipeline(model_type="local_projections",
+                               run_stress=False, var_lags=1)
+        assert "predicted_pd" in result
+
+    def test_shock_path(self):
+        from pipeline.run_pipeline import run_pipeline
+        result = run_pipeline(run_stress=False, var_lags=1,
+                               shock_u=3.0, shock_pi=1.0)
+        assert result["shock_path"] is not None
+        assert "predicted_pd" in result["shock_path"].columns
+
+    def test_scenario_comparison(self):
+        from pipeline.run_pipeline import run_scenario_comparison
+        results = run_scenario_comparison(
+            ["Baseline", "Adverse"], model_type="var", var_lags=1
+        )
+        assert "Baseline" in results
+        assert "Adverse" in results
+        assert results["Adverse"]["predicted_pd"] >= results["Baseline"]["predicted_pd"]
+
+
+# ── API ───────────────────────────────────────────────────────────────────────
+
+class TestAPI:
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from fastapi.testclient import TestClient
+        from api.server import app
+        self.client = TestClient(app)
+
+    def test_health(self):
+        r = self.client.get("/health")
+        assert r.status_code == 200
+
+    def test_forecast_and_score(self):
+        r = self.client.get("/forecast_and_score")
+        assert r.status_code == 200
+        assert "predicted_pd" in r.json()
+
+    def test_score_endpoint(self):
+        r = self.client.post("/score",
+                              json={"unemployment": 8.0, "inflation": 4.0})
+        assert r.status_code == 200
+        data = r.json()
+        assert 0 < data["predicted_pd"] < 1
+
+    def test_score_invalid(self):
+        r = self.client.post("/score",
+                              json={"unemployment": -1, "inflation": 2.0})
+        assert r.status_code == 422
+
+    def test_stress_test_endpoint(self):
+        r = self.client.get("/stress_test")
+        assert r.status_code == 200
+        assert len(r.json()) > 0
+
+
+####################################################################################################
+# FILE: tools/export_codebase.py
+####################################################################################################
+
+"""
+tools/export_codebase.py
+------------------------
+Interactive codebase exporter.
+
+- Asks user permission
+- Anchors to true project root (not cwd)
+- Recursively scans ALL project files safely
+- Collects:
+    - all .py files
+    - Makefile
+- Excludes venv, caches, git, build artifacts
+- Writes timestamped snapshot into tools/snapshots/
+"""
+
+from pathlib import Path
+from datetime import datetime
+import sys
+
+
+# ------------------------------------------------------------
+# ROOT DETECTION
+# ------------------------------------------------------------
+def find_project_root(current_path: Path) -> Path:
+    """
+    Walk upward until we find project markers.
+    We assume root contains core folders like:
+        - models/
+        - pipeline/
+        - api/
+    """
+    for parent in [current_path] + list(current_path.parents):
+        if (parent / "models").exists() and (parent / "pipeline").exists():
+            return parent
+    return current_path.parent
+
+
+# ------------------------------------------------------------
+# FILE COLLECTION (FIXED)
+# ------------------------------------------------------------
+def collect_project_files(root: Path):
+    """
+    Collect ALL project-relevant files safely.
+
+    Strategy:
+    - Walk entire tree
+    - Exclude noise directories (venv, cache, etc.)
+    - Include ALL valid project modules regardless of depth
+    - Explicitly include Makefile
+    """
+
+    ignored_dirs = {
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".git",
+        ".idea",
+        ".pytest_cache",
+        ".mypy_cache",
+        "build",
+        "dist",
+        "snapshots",
+        "site-packages",
+    }
+
+    files = []
+
+    for path in root.rglob("*"):
+
+        # only Python files + Makefile
+        if not (path.name.endswith(".py") or path.name == "Makefile"):
+            continue
+
+        # skip non-files
+        if not path.is_file():
+            continue
+
+        # skip hidden paths anywhere (.git, .env, etc.)
+        if any(part.startswith(".") for part in path.parts):
+            continue
+
+        # skip ignored dirs anywhere in path
+        if any(part in ignored_dirs for part in path.parts):
+            continue
+
+        files.append(path)
+
+    return sorted(set(files))
+
+
+# ------------------------------------------------------------
+# SNAPSHOT BUILDER
+# ------------------------------------------------------------
+def build_snapshot(root: Path, files: list[Path]) -> str:
+    """
+    Combine all code into one structured snapshot.
+    """
+
+    snapshot = []
+    snapshot.append("# CODEBASE SNAPSHOT\n")
+    snapshot.append(f"# Root: {root}\n")
+    snapshot.append(f"# Generated: {datetime.now().isoformat()}\n\n")
+    snapshot.append("=" * 100 + "\n")
+
+    for f in files:
+        rel = f.relative_to(root)
+
+        snapshot.append("\n\n")
+        snapshot.append("#" * 100 + "\n")
+        snapshot.append(f"# FILE: {rel}\n")
+        snapshot.append("#" * 100 + "\n\n")
+
+        try:
+            content = f.read_text(encoding="utf-8")
+        except Exception as e:
+            content = f"# ERROR READING FILE: {e}"
+
+        snapshot.append(content)
+        snapshot.append("\n")
+
+    return "".join(snapshot)
+
+
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
+def main():
+    print("\nCODEBASE EXPORT TOOL")
+    print("====================\n")
+
+    answer = input(
+        "Would you like to export the full codebase snapshot for 'credit_model_project'? (y/n): "
+    ).strip().lower()
+
+    if answer != "y":
+        if answer == "n":
+            print("Okay thanks — snapshot not created.")
+            sys.exit(0)
+        else:
+            print("Please enter 'y' for yes or 'n' for no.")
+            sys.exit(1)
+
+    # Anchor to script location
+    script_path = Path(__file__).resolve()
+    tools_dir = script_path.parent
+    project_root = find_project_root(tools_dir)
+
+    print(f"\nDetected project root: {project_root}")
+
+    files = collect_project_files(project_root)
+
+    print(f"Found {len(files)} project files")
+
+    snapshot = build_snapshot(project_root, files)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    snapshot_dir = project_root / "tools" / "snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    output_file = snapshot_dir / f"codebase_snapshot_{timestamp}.txt"
+
+    output_file.write_text(snapshot, encoding="utf-8")
+
+    print("\nDONE")
+    print(f"Snapshot saved to:\n{output_file}\n")
+
+
+if __name__ == "__main__":
+    main()
+
+
+####################################################################################################
+# FILE: utils/__init__.py
+####################################################################################################
+
+
+
+
+####################################################################################################
+# FILE: utils/logger.py
+####################################################################################################
+
+"""
+utils/logger.py
+---------------
+Simple production-style logger used across pipeline.
+"""
+
+import logging
+
+
+def get_logger(name: str):
+    logger = logging.getLogger(name)
+
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s - %(name)s: %(message)s"
+        )
+
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
+
+
+####################################################################################################
+# FILE: utils/run_metadata.py
+####################################################################################################
+
+"""
+utils/run_metadata.py
+---------------------
+Now stores full experiment metadata for:
+- run history dashboard
+- model comparison
+- research reproducibility
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+
+RUN_DIR = Path("runs")
+
+
+def save_run_metadata(result: dict):
+    RUN_DIR.mkdir(exist_ok=True)
+
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "experiment_id": result.get("experiment_id"),
+        "model_version": result.get("model_version"),
+
+        "pd": result.get("predicted_pd"),
+        "rating": result.get("rating"),
+
+        "forecast": result.get("forecast"),
+    }
+
+    file_path = RUN_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    with open(file_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+    return str(file_path)
+
+
+####################################################################################################
+# FILE: utils/serialization.py
+####################################################################################################
+
+# utils/serialization.py
+
+import numpy as np
+import pandas as pd
+from datetime import datetime
+
+
+def to_json_safe(obj):
+    """
+    Recursively convert anything into JSON-safe Python primitives.
+    This is the SINGLE source of truth for all logging + storage.
+    """
+
+    # NumPy scalars (int64, float64, etc.)
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    # NumPy arrays
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # Pandas Timestamp
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+
+    # Datetime
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+
+    # Dict
+    if isinstance(obj, dict):
+        return {k: to_json_safe(v) for k, v in obj.items()}
+
+    # List / tuple
+    if isinstance(obj, (list, tuple)):
+        return [to_json_safe(v) for v in obj]
+
+    return obj

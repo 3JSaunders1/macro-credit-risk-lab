@@ -5,4 +5,4 @@ __pycache__/
 runs/
 models/artifacts/
 htmlcov/
-.DS_Store
+.DS_Store.env

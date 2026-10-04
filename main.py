@@ -53,7 +53,7 @@ def main():
     # -------------------------
     print_section("Stress Test")
 
-    print(result["stress_test"].to_string(index=False))
+    print(result["stress_test"].round(2).to_string(index=False))
 
     # -------------------------
     # DIAGNOSTICS (SAFE)

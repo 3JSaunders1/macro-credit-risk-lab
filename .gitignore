@@ -9,7 +9,7 @@ __pycache__/
 htmlcov/
 
 # Generated outputs
-runs/
+/runs/
 models/artifacts/
 tools/snapshots/
 

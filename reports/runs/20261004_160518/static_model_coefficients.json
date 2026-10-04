@@ -1,0 +1,9 @@
+{
+  "beta_0": -3.9236790126290453,
+  "beta_u": 0.07394241691501624,
+  "beta_pi": -0.08169482425258347,
+  "target": "consumer loan charge-off rate, all commercial banks (CORCACBS), as a fraction",
+  "model": "fractional logit (binomial GLM, logit link), HAC standard errors",
+  "sample": "1985-07-01 to 2026-04-01",
+  "estimated_utc": "2026-10-04T20:05:20.398716+00:00"
+}

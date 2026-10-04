@@ -1,0 +1,27 @@
+{
+  "created_utc": "2026-10-04T14:22:33.062743+00:00",
+  "source": "FRED, Federal Reserve Bank of St. Louis",
+  "series": {
+    "UNRATE": "Civilian unemployment rate, monthly, seasonally adjusted",
+    "CPIAUCSL": "CPI for all urban consumers, all items, monthly, seasonally adjusted",
+    "CORCACBS": "Charge-off rate on consumer loans, all commercial banks, quarterly, SA"
+  },
+  "transformations": {
+    "unemployment": "quarterly average of monthly UNRATE (complete quarters only)",
+    "inflation": "year-over-year % change of quarterly average CPIAUCSL (complete quarters only)",
+    "charge_off_rate": "CORCACBS, quarterly",
+    "missing_months": "interior missing months linearly interpolated; trailing incomplete quarters dropped"
+  },
+  "interpolated_months": {
+    "UNRATE": [
+      "2025-10"
+    ],
+    "CPIAUCSL": [
+      "2025-10"
+    ]
+  },
+  "frequency": "quarterly (quarter-start dates)",
+  "start": "1985-01-01",
+  "end": "2026-04-01",
+  "rows": 166
+}

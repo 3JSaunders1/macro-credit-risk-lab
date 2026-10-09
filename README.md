@@ -32,8 +32,7 @@ Bank stress testing (CCAR/DFAST) and CECL reserving both ask the same question: 
 
 and validates each link the way a model risk team would: out-of-sample forecasts against a benchmark, conditional backtests of the loss model, and scenario results compared with history.
 
-It complements my [Credit Default Prediction Model](https://github.com/3JSaunders1/credit-default-model), which models borrower-level default. This project models how the macroeconomy drives portfolio-level losses.
-
+It complements my [Credit Default Prediction Model](https://github.com/3JSaunders1/credit-default-model), which models borrower-level default. This project models how the macroeconomy drives portfolio-level losses. The two are linked in my [Credit Risk Platform](https://github.com/3JSaunders1/credit-risk-platform), which runs these stress scenarios through loan-level PDs to estimate losses for a real loan portfolio.
 ---
 
 ## 2. Data
@@ -317,8 +316,7 @@ Results tables are still printed as each step's report; logging covers operation
 
 ## 12. Further Development
 
-- **Link to the borrower-level model:** feed scenario paths into the [Credit Default Prediction Model](https://github.com/3JSaunders1/credit-default-model) to produce stressed PDs and expected losses (PD × LGD × EAD) for a loan portfolio
-- **Richer macro drivers:** house prices, credit spreads, and lending standards, to capture housing- and credit-driven crises
+- ✅ **Linked to the borrower-level model** in the [Credit Risk Platform](https://github.com/3JSaunders1/credit-risk-platform): these scenarios shift the [Credit Default Prediction Model](https://github.com/3JSaunders1/credit-default-model)'s loan-level PDs to produce stressed expected losses (PD × LGD × EAD) for a $3.62B loan portfolio, with data contracts and enforced temporal integrity
 - **Posterior simulation for the BVAR,** so intervals reflect parameter uncertainty
 - **COVID handling for the macro models,** such as pandemic indicators or volatility adjustments
 - **Additional identified shocks,** such as a supply shock (unemployment and inflation rising together) for stagflation scenarios

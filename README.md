@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/3JSaunders1/macro-credit-risk-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/3JSaunders1/macro-credit-risk-lab/actions/workflows/tests.yml)
 
-A macro stress-testing platform: five macroeconomic forecasting models (VAR, Cholesky and sign-restricted SVARs, a Minnesota-prior Bayesian VAR, and local projections), a dynamic credit loss model estimated on 40 years of consumer charge-off data, and a scenario engine that propagates structural shocks through the Bayesian VAR into projected losses. Every component is validated out of sample: forecasts against a random walk, the loss model through the 2008 crisis and COVID, and stress scenarios against actual 2008 losses. Includes a FastAPI service, an interactive Streamlit dashboard, automated tests, and an honest account of limitations.
+A macro stress-testing platform: five macroeconomic forecasting models (VAR, Cholesky and sign-restricted SVARs, a Minnesota-prior Bayesian VAR, and local projections), a dynamic credit loss model estimated on 40 years of consumer charge-off data, and a scenario engine that propagates structural shocks through the Bayesian VAR into projected losses. Every component is validated out of sample: forecasts against a random walk, the loss model through the 2008 crisis and COVID, and stress scenarios against actual 2008 losses. Includes a FastAPI service, an interactive Streamlit dashboard, Docker images for both, structured logging, automated tests, and an honest account of limitations.
 
 ---
 
@@ -20,7 +20,7 @@ A macro stress-testing platform: five macroeconomic forecasting models (VAR, Cho
 | **Interval coverage** | 90% intervals cover 84-89% of outcomes one quarter out, but only 73-83% four quarters out |
 | **Stress scenarios** | A Severely Adverse scenario with 2008-level unemployment produces **9.5%** cumulative 9-quarter losses vs. **10.7%** actual in 2008-2010, about 12% short |
 | **Model review** | Eight errors found and corrected in the original version, including hard-coded forecast intervals, a mis-specified Minnesota prior, and non-structural "structural" impulse responses |
-| **Engineering** | 64 automated tests in CI (including a dashboard smoke test), pinned dependencies, a one-command pipeline, and timestamped run archives |
+| **Engineering** | 67 automated tests in CI (including a dashboard smoke test), Docker images for the API and dashboard, structured logging with step timing and failure handling, pinned dependencies, a one-command pipeline, and timestamped run archives |
 
 ---
 
@@ -75,6 +75,9 @@ FRED API → pipeline/fetch_data.py → data/macro_data.csv
           ┌──────────────┼──────────────┐
           ▼              ▼              ▼
      FastAPI          Streamlit       CLI / Makefile
+          └──────┬───────┘
+                 ▼
+     Docker image + docker-compose
 ```
 
 ---
@@ -233,7 +236,7 @@ The original version of this project produced plausible-looking output with seve
 
 ## 9. Dashboard and API
 
-**Streamlit dashboard** (`make dashboard`):
+**Streamlit dashboard** (`make dashboard`, or `make docker-up` for the containerized version):
 - **Overview:** next-quarter forecasts with model-based intervals at a chosen level, history, the latest charge-off rate, the stress summary, and diagnostics
 - **Impulse responses:** responses for the selected model, with sign-restriction and local projection bands, plus FEVD
 - **Stress scenarios:** macro and loss paths for every configured scenario, and cumulative losses against the actual 2008 reference
@@ -254,7 +257,29 @@ The original version of this project produced plausible-looking output with seve
 
 ## 10. Engineering and Reproducibility
 
-**64 automated tests** run on every push through **GitHub Actions:**
+### Docker
+A `Dockerfile` pins Python 3.11 and every dependency, so the project runs identically on any machine with Docker. One image serves both the API and the dashboard through `docker-compose.yaml`:
+
+```bash
+make docker-test     # build the image and run the full test suite in a container
+make docker-up       # serve the API (localhost:8000/docs) and dashboard (localhost:8501)
+make docker-down     # stop the containers
+```
+
+The image is built once and shared by both services; containers run exactly the code in the image, with no source folders mounted over it. The FRED data is small and committed, so it is included; credentials (`.env`) and run archives are excluded by `.dockerignore`.
+
+### Logging
+Every pipeline step uses a shared logging setup (`utils/logging_utils.py`):
+
+- **Timestamped, labeled messages**, such as `20:41:08 | INFO | scenario_engine | Saved results and chart to reports/figures`
+- **Step timing:** each step logs when it starts and how long it took
+- **Clean failures:** an error logs its full traceback and exits with a nonzero code
+- **Adjustable detail:** set `LOG_LEVEL` (for example, `LOG_LEVEL=WARNING make all`) to change verbosity without editing code
+
+Results tables are still printed as each step's report; logging covers operational events. Each logged step in the Makefile runs with `set -o pipefail`, so a failing step stops `make all` even though its output is piped to `tee` for the run log. (This is set per command because macOS ships GNU Make 3.81, which ignores `.SHELLFLAGS`.)
+
+### Automated tests
+**67 tests** run on every push through **GitHub Actions:**
 
 | Test file | What it checks |
 |---|---|
@@ -264,15 +289,16 @@ The original version of this project produced plausible-looking output with seve
 | `test_credit_estimation.py` | Exact coefficient recovery, including the intercept |
 | `test_loss_model.py` | Parameter recovery, losses rising with unemployment, and bounded, convergent simulations |
 | `test_scenarios.py` | Shock accumulation and scaling, exact peak targets, losses rising with severity, and the API using the configured scenarios |
+| `test_logging.py` | Each pipeline step logs its start and duration, a failing step logs its traceback and exits with code 1, and loggers use short module names |
 | `test_dashboard.py` | The full dashboard runs without errors |
 | `test_suite.py` | Model interfaces, pipeline outputs, and every API endpoint |
 
-**Other practices:**
+### Other practices
 - **One source of truth for scenarios:** `config/scenarios.py`, read by the engine, pipeline, API, and dashboard
 - **Pinned dependencies** in `requirements.txt`
 - **One-command pipeline:** `make all` runs the estimation, backtests, scenarios, and CLI, then archives every figure, table, and parameter file with the Git commit in `reports/runs/<timestamp>/`
 - **A model card** (`docs/model_card.md`) with intended use, performance, limitations, and a monitoring plan
-- **No hidden side effects:** nothing writes files on import, and run metadata is saved only on request
+- **No hidden side effects:** nothing writes files on import; CLI run records are saved only on request, to `reports/cli_runs/`
 - **Credentials kept out of the code:** the FRED key lives in an untracked `.env` file
 
 ---
@@ -296,7 +322,7 @@ The original version of this project produced plausible-looking output with seve
 - **Posterior simulation for the BVAR,** so intervals reflect parameter uncertainty
 - **COVID handling for the macro models,** such as pandemic indicators or volatility adjustments
 - **Additional identified shocks,** such as a supply shock (unemployment and inflation rising together) for stagflation scenarios
-- **Deployment** of the dashboard as a hosted app
+- **Cloud deployment** of the containerized dashboard and API as a hosted app
 
 ---
 
@@ -336,13 +362,22 @@ macro-credit-risk-lab/
 │   └── scenario_engine.py        # model-based stress scenarios
 ├── reports/
 │   ├── figures/                  # latest figures and tables
-│   └── runs/                     # timestamped run archives
+│   ├── runs/                     # timestamped run archives
+│   └── cli_runs/                 # CLI run records (saved on request)
 ├── services/pipeline_service.py
-├── tests/                        # 64 tests
-├── tools/export_codebase.py
-├── utils/                        # serialization and run metadata
+├── tests/                        # 67 tests
+├── tools/
+│   ├── export_codebase.py        # project snapshot tool
+│   └── add_logging.py            # one-time refactor that added logging to every runnable module
+├── utils/
+│   ├── logging_utils.py          # shared logging: timestamps, levels, step timing, failures
+│   ├── run_metadata.py           # CLI run records
+│   └── serialization.py          # JSON-safe conversion for the API
+├── .dockerignore                 # keeps credentials and run archives out of the image
+├── Dockerfile                    # reproducible environment: Python 3.11 + pinned dependencies
+├── docker-compose.yaml           # serves the API and dashboard from one image
 ├── main.py                       # CLI
-├── Makefile
+├── Makefile                      # one-command pipeline, Docker targets, run archiving
 ├── requirements.txt
 └── setup_env.py
 ```
@@ -366,7 +401,7 @@ make data
 ```bash
 make all
 ```
-Estimates the credit models, runs the backtests and scenarios, runs the CLI, and archives everything to `reports/runs/<timestamp>/`.
+Estimates the credit models, runs the backtests and scenarios, runs the CLI, and archives everything to `reports/runs/<timestamp>/`. Set `LOG_LEVEL=WARNING` for quieter output.
 
 **4. Explore**
 ```bash
@@ -375,10 +410,17 @@ make api           # FastAPI service at http://localhost:8000/docs
 make test          # test suite
 ```
 
+**5. Or run everything in Docker** (no local Python setup needed)
+```bash
+make docker-test   # tests in a container
+make docker-up     # API at localhost:8000/docs, dashboard at localhost:8501
+make docker-down   # stop
+```
+
 Individual steps: `make estimate`, `make backtest`, `make scenarios`, and `make run`.
 
 ---
 
 ## 15. Tech Stack
 
-Python · pandas · NumPy · SciPy · statsmodels · Matplotlib · Plotly · Streamlit · FastAPI · pytest · GitHub Actions · Make · FRED API
+Python · pandas · NumPy · SciPy · statsmodels · Matplotlib · Plotly · Streamlit · FastAPI · pytest · Docker · GitHub Actions · Make · FRED API

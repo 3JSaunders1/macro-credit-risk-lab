@@ -1,0 +1,10 @@
+venv/
+.git/
+.env
+reports/runs/
+reports/cli_runs/
+tools/snapshots/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

@@ -1,30 +1,16 @@
-version: "3.9"
-
+# Serves the API and dashboard from one shared image, built once by `make docker-build`.
+# Start with `make docker-up`; stop with `make docker-down`.
 services:
-
   api:
-    build: .
-    container_name: credit_api
+    image: macro-credit-risk-lab
+    pull_policy: never
+    command: uvicorn api.server:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
-    command: uvicorn api.server:app --host 0.0.0.0 --port 8000
-    volumes:
-      - .:/app
 
   dashboard:
-    build: .
-    container_name: credit_dashboard
+    image: macro-credit-risk-lab
+    pull_policy: never
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
     ports:
       - "8501:8501"
-    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
-    depends_on:
-      - api
-    volumes:
-      - .:/app
-
-  cli:
-    build: .
-    container_name: credit_cli
-    command: python main.py
-    volumes:
-      - .:/app

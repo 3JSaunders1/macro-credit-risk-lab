@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-10-08T20:32:43.342593",
+  "experiment_id": "1f8fc4b1",
+  "model_type": "var",
+  "pd": 0.007972261675159947,
+  "rating": "A",
+  "forecast": {
+    "unemployment": 4.304685567752904,
+    "inflation": 4.013737549813425
+  }
+}

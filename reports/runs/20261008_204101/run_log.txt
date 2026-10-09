@@ -1,0 +1,149 @@
+20:41:03 | INFO    | credit_estimation | Started
+Train: 1985-07-01 to 2006-10-01 (86 quarters)
+Test:  2007-01-01 to 2026-04-01 (78 quarters)
+
+=== Out-of-time accuracy, 2007 onward (percentage points of charge-off rate) ===
+                                    model  rmse_pp  mae_pp  bias_pp
+                 Benchmark: training mean    1.335   0.827   -0.515
+       Fractional logit (contemporaneous)    1.445   0.942   -0.415
+Fractional logit (unemployment lagged 2q)    1.488   0.965   -0.383
+
+=== Contemporaneous model in stress periods ===
+2008 crisis (2008-2010): actual avg 4.98%, predicted avg 1.97%, bias -3.00 pp
+COVID (2020-2021): actual avg 1.58%, predicted avg 1.99%, bias +0.41 pp
+
+=== Coefficients, contemporaneous model (training 1985-2006) ===
+                coef  se_hac  p_value
+const        -3.0490  0.2554   0.0000
+unemployment -0.0839  0.0465   0.0712
+inflation    -0.1018  0.0432   0.0185
+
+=== Coefficients, full sample (documentation only; not used by the pipeline) ===
+                coef  se_hac  p_value
+const        -3.9237  0.2536   0.0000
+unemployment  0.0739  0.0437   0.0909
+inflation    -0.0817  0.0274   0.0028
+20:41:03 | INFO    | credit_estimation | Saved coefficients to /Users/johnsaunders/Desktop/credit_model_project/config/static_model_coefficients.json and chart to /Users/johnsaunders/Desktop/credit_model_project/reports/figures
+20:41:03 | INFO    | credit_estimation | Finished in 0.2s
+20:41:04 | INFO    | loss_validation | Started
+Trained on 1986-01-01 to 2006-10-01 (84 quarters)
+
+=== 1. One-step-ahead accuracy, 2007 onward (RMSE, percentage points) ===
+                           model  rmse_pp
+Naive persistence (last quarter)    0.303
+             Static levels model    1.410
+              Dynamic loss model    0.268
+
+=== Coefficients (training 1985-2006) ===
+                     coef  se_hac  p_value
+const             -0.2595  0.1515   0.0866
+lag_logit_loss     0.9354  0.0457   0.0000
+d4_unemployment    0.0242  0.0176   0.1676
+inflation          0.0095  0.0094   0.3135
+bankruptcy_2005q4  0.0187  0.0281   0.5068
+bankruptcy_2006q1 -0.5393  0.0299   0.0000
+Persistence rho = 0.935; half-life of a shock ~ 10.4 quarters
+
+=== 2008 crisis: conditional backtest from 2007-10 (actual macro path) ===
+Start 2.80% | actual peak 6.60% | simulated peak 3.72% | cumulative loss ratio (sim/actual) 0.67
+
+=== COVID: conditional backtest from 2019-10 (actual macro path) ===
+Start 2.30% | actual peak 2.28% | simulated peak 3.42% | cumulative loss ratio (sim/actual) 1.84
+
+=== Full-sample coefficients (saved for the scenario engine) ===
+                     coef  se_hac  p_value
+const             -0.3355  0.1048   0.0014
+lag_logit_loss     0.9137  0.0291   0.0000
+d4_unemployment    0.0377  0.0096   0.0001
+inflation          0.0117  0.0053   0.0282
+bankruptcy_2005q4  0.0176  0.0161   0.2759
+bankruptcy_2006q1 -0.5389  0.0168   0.0000
+covid_policy      -0.2605  0.0684   0.0001
+20:41:05 | INFO    | loss_validation | Saved parameters to config/loss_model.json and chart to /Users/johnsaunders/Desktop/credit_model_project/reports/figures
+20:41:05 | INFO    | loss_validation | Finished in 0.2s
+20:41:06 | INFO    | forecast_backtest | Started
+Data: 1985-01-01 to 2026-04-01; origins from 2000; horizons [1, 4]
+
+=== Full sample (2000 onward, including COVID) ===
+ h     variable       model  rmse  rel_rmse_vs_rw  coverage_90  dm_stat  dm_p
+ 1    inflation     BVAR(2) 0.826           0.973        0.857   -0.898 0.369
+ 1    inflation Random walk 0.849           1.000        0.838      NaN   NaN
+ 1    inflation      VAR(2) 0.965           1.137        0.857    0.747 0.455
+ 1 unemployment     BVAR(2) 1.063           1.013        0.857    0.600 0.548
+ 1 unemployment Random walk 1.050           1.000        0.876      NaN   NaN
+ 1 unemployment      VAR(2) 1.571           1.497        0.838    0.991 0.322
+ 4    inflation     BVAR(2) 1.811           0.889        0.755   -1.615 0.106
+ 4    inflation Random walk 2.037           1.000        0.804      NaN   NaN
+ 4    inflation      VAR(2) 2.481           1.218        0.755    0.799 0.424
+ 4 unemployment     BVAR(2) 1.676           0.968        0.725   -0.819 0.413
+ 4 unemployment Random walk 1.731           1.000        0.824      NaN   NaN
+ 4 unemployment      VAR(2) 3.435           1.984        0.775    1.010 0.313
+
+=== Excluding COVID targets (2020-2021) ===
+ h     variable       model  rmse  rel_rmse_vs_rw  coverage_90  dm_stat  dm_p
+ 1    inflation     BVAR(2) 0.755           0.954        0.887   -1.332 0.183
+ 1    inflation Random walk 0.791           1.000        0.856      NaN   NaN
+ 1    inflation      VAR(2) 0.746           0.943        0.887   -1.244 0.213
+ 1 unemployment     BVAR(2) 0.269           0.939        0.876   -1.217 0.224
+ 1 unemployment Random walk 0.286           1.000        0.897      NaN   NaN
+ 1 unemployment      VAR(2) 0.236           0.824        0.856   -1.454 0.146
+ 4    inflation     BVAR(2) 1.725           0.889        0.777   -1.390 0.165
+ 4    inflation Random walk 1.941           1.000        0.819      NaN   NaN
+ 4    inflation      VAR(2) 1.810           0.933        0.777   -0.717 0.473
+ 4 unemployment     BVAR(2) 1.047           0.993        0.766   -0.125 0.901
+ 4 unemployment Random walk 1.054           1.000        0.883      NaN   NaN
+ 4 unemployment      VAR(2) 0.984           0.933        0.830   -0.732 0.464
+20:41:06 | INFO    | forecast_backtest | Saved tables and chart to /Users/johnsaunders/Desktop/credit_model_project/reports/figures
+20:41:06 | INFO    | forecast_backtest | Finished in 0.3s
+20:41:07 | INFO    | scenario_engine | Started
+Scenarios start 2026-07-01; latest actual charge-off rate 2.66%
+
+=== Scenario results ===
+                   scenario  peak_unemployment  peak_inflation  peak_loss_rate_pct  cumulative_9q_loss_pct
+                   Baseline               5.26            3.86                3.16                    6.63
+                    Adverse               7.73            3.63                3.94                    7.90
+           Severely Adverse              10.73            3.39                5.12                    9.46
+                Stagflation               7.46            7.55                4.64                    9.02
+Sharp V-shaped (COVID-like)              12.37            2.71                6.02                    9.90
+
+Reference: actual 2008 Q1-2010 Q1 cumulative loss = 10.70% (peak quarterly rate 6.60%)
+20:41:08 | INFO    | scenario_engine | Saved results and chart to /Users/johnsaunders/Desktop/credit_model_project/reports/figures
+20:41:08 | INFO    | scenario_engine | Finished in 0.2s
+20:41:09 | INFO    | main | Started
+
+============================================================
+MACRO FORECAST
+============================================================
+Unemployment : 4.30%
+  CI         : [2.95, 5.66]
+Inflation    : 4.01%
+  CI         : [2.87, 5.15]
+
+============================================================
+CREDIT RISK
+============================================================
+PD      : 0.7972%
+Rating  : A
+
+============================================================
+SENSITIVITY
+============================================================
++1pp U → ΔPD : +0.1557%
++1pp π → ΔPD : +0.0831%
+
+============================================================
+STRESS TEST
+============================================================
+                   scenario  peak_unemployment  peak_inflation  peak_loss_rate_pct  cumulative_9q_loss_pct
+                   Baseline               5.26            3.86                3.16                    6.63
+                    Adverse               7.73            3.63                3.94                    7.90
+           Severely Adverse              10.73            3.39                5.12                    9.46
+                Stagflation               7.46            7.55                4.64                    9.02
+Sharp V-shaped (COVID-like)              12.37            2.71                6.02                    9.90
+
+============================================================
+DIAGNOSTICS
+============================================================
+VAR Lags Used : 2
+VAR Stable    : True
+20:41:09 | INFO    | main | Finished in 0.0s

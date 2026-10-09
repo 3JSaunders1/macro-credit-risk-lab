@@ -1,20 +1,17 @@
-FROM python:3.11-slim
+# Reproducible environment for the Macro-Driven Credit Risk Lab
+FROM python:3.11-slim-bookworm
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends make \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Install dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project
 COPY . .
 
-# Default port exposure (API)
-EXPOSE 8000
+EXPOSE 8000 8501
 
-# Default command (can be overridden in docker-compose)
-CMD ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default: run the test suite. docker-compose overrides this to serve the API and dashboard.
+CMD ["python", "-m", "pytest", "-q"]

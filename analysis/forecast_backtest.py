@@ -42,6 +42,11 @@ MODELS = {
 }
 
 
+from utils.logging_utils import get_logger, run_main
+
+log = get_logger(__name__)
+
+
 def load_data() -> pd.DataFrame:
     df = pd.read_csv(DATA, parse_dates=["date"]).set_index("date")[VARS]
     df.index.freq = "QS"          # quarterly, quarter-start dates
@@ -132,8 +137,6 @@ def main():
             ax.plot(s.index, s, label=f"{name}, 4q ahead")
         ax.set_title(f"{var.capitalize()}: 4-quarter-ahead forecasts"); ax.legend()
     plt.tight_layout(); plt.savefig(FIG_DIR / "forecast_backtest.png", dpi=150); plt.close()
-    print(f"\nSaved tables and chart to {FIG_DIR}")
-
-
+    log.info(f"Saved tables and chart to {FIG_DIR}")
 if __name__ == "__main__":
-    main()
+    run_main(main)

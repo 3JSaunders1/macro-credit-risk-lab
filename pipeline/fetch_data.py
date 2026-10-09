@@ -31,6 +31,11 @@ SERIES = {
 }
 
 
+from utils.logging_utils import get_logger, run_main
+
+log = get_logger(__name__)
+
+
 def fetch_series(series_id: str, start: str, api_key: str) -> pd.Series:
     params = {"series_id": series_id, "api_key": api_key,
               "file_type": "json", "observation_start": start}
@@ -116,11 +121,11 @@ def main():
     }
     OUT_META.write_text(json.dumps(meta, indent=2))
 
-    print(f"Saved {len(df)} quarters ({meta['start']} to {meta['end']}) to {OUT_CSV}")
+    log.info(f"Saved {len(df)} quarters ({meta['start']} to {meta['end']}) to {OUT_CSV}")
     print(f"Charge-off rate available for {df['charge_off_rate'].notna().sum()} quarters")
     print(f"Interpolated months: {filled}")
     print(df.tail(4).to_string())
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

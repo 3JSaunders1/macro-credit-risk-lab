@@ -1,11 +1,13 @@
 """
 models/credit_model.py
 ----------------------
-Macro-driven credit loss model.
+Illustrative static mapping from macro levels to a loss rate and rating.
 
-Maps macro variables to the consumer charge-off rate (a loss rate, roughly PD x LGD)
-using a logistic form, estimated by fractional logit in models/credit_estimation.py.
-Used for stress testing, rating assignment, and sensitivity analysis.
+Uses the calibrated priors in config/settings.py (or config/credit_coefficients.json,
+if present). This mapping is NOT used for stress testing: the static levels model
+fails out of time (see models/credit_estimation.py), so the validated path is the
+dynamic loss model (models/loss_model.py) driven by the scenario engine. It is kept
+only for the illustrative /score endpoint and the CLI summary.
 """
 
 import json

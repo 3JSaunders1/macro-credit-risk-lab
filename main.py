@@ -5,6 +5,7 @@ CLI entry point
 """
 
 from services.pipeline_service import run_fresh_pipeline
+from utils.logging_utils import run_main
 
 
 def print_section(title: str):
@@ -65,4 +66,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

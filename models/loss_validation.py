@@ -23,6 +23,11 @@ BACKTESTS = {"2008 crisis": ("2007-10-01", "2010-10-01"),
              "COVID": ("2019-10-01", "2021-10-01")}
 
 
+from utils.logging_utils import get_logger, run_main
+
+log = get_logger(__name__)
+
+
 def rmse_pp(actual: pd.Series, predicted: pd.Series) -> float:
     return float(np.sqrt((((predicted - actual) * 100) ** 2).mean()))
 
@@ -78,8 +83,6 @@ def main():
     print("\n=== Full-sample coefficients (saved for the scenario engine) ===")
     r = full.result
     print(pd.DataFrame({"coef": r.params, "se_hac": r.bse, "p_value": r.pvalues}).round(4).to_string())
-    print(f"\nSaved parameters to config/loss_model.json and chart to {fig_dir}")
-
-
+    log.info(f"Saved parameters to config/loss_model.json and chart to {fig_dir}")
 if __name__ == "__main__":
-    main()
+    run_main(main)

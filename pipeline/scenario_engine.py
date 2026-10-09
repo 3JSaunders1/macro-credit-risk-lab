@@ -31,6 +31,11 @@ VARS = ["unemployment", "inflation"]
 REFERENCE_2008 = ("2008-01-01", "2010-01-01")      # 9 quarters of actual losses
 
 
+from utils.logging_utils import get_logger, run_main
+
+log = get_logger(__name__)
+
+
 def load_history() -> pd.DataFrame:
     df = pd.read_csv(DATA, parse_dates=["date"]).set_index("date")
     df.index.freq = "QS"
@@ -130,8 +135,6 @@ def main():
         ax.set_title(title); ax.tick_params(axis="x", rotation=45)
     axes[2].legend(fontsize=8)
     plt.tight_layout(); plt.savefig(FIG_DIR / "scenario_paths.png", dpi=150); plt.close()
-    print(f"\nSaved results and chart to {FIG_DIR}")
-
-
+    log.info(f"Saved results and chart to {FIG_DIR}")
 if __name__ == "__main__":
-    main()
+    run_main(main)

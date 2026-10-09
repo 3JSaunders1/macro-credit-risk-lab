@@ -31,6 +31,11 @@ PERIODS = {"2008 crisis (2008-2010)": ("2008-01-01", "2010-10-01"),
            "COVID (2020-2021)": ("2020-01-01", "2021-10-01")}
 
 
+from utils.logging_utils import get_logger, run_main
+
+log = get_logger(__name__)
+
+
 def load_data() -> pd.DataFrame:
     df = pd.read_csv(DATA, parse_dates=["date"]).set_index("date")
     df["loss_rate"] = df["charge_off_rate"] / 100          # percent -> fraction
@@ -124,8 +129,6 @@ def main():
     plt.tight_layout(); plt.savefig(FIG_DIR / "credit_link_oot.png", dpi=150); plt.close()
 
     results.to_csv(FIG_DIR / "credit_link_oot_metrics.csv", index=False)
-    print(f"\nSaved coefficients to {COEF_FILE} and chart to {FIG_DIR}")
-
-
+    log.info(f"Saved coefficients to {COEF_FILE} and chart to {FIG_DIR}")
 if __name__ == "__main__":
-    main()
+    run_main(main)
